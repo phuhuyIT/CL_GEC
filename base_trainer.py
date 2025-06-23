@@ -113,7 +113,7 @@ class GECLightningModule(L.LightningModule):
             f05 = self.evaluator.calculate_f05(source, pred, target)
             f05_scores.append(f05)
         
-        avg_f05 = np.mean(f05_scores)
+        avg_f05 = float(np.mean(f05_scores))  # Convert to Python float
         
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log('val_f05', avg_f05, on_step=False, on_epoch=True, prog_bar=True)
@@ -136,7 +136,7 @@ class GECLightningModule(L.LightningModule):
         if not outputs:
             return
             
-        avg_f05 = torch.stack([x['val_f05'] for x in outputs]).mean()
+        avg_f05 = torch.tensor([x['val_f05'] for x in outputs]).mean()
         
         if avg_f05 > self.best_f05:
             self.best_f05 = avg_f05
@@ -256,6 +256,7 @@ class HyperparameterOptimizer:
         )
         
         # Trainer
+        precision = 16 if torch.cuda.is_available() else 32
         trainer = L.Trainer(
             max_epochs=max_epochs,
             logger=wandb_logger,
@@ -263,7 +264,7 @@ class HyperparameterOptimizer:
             enable_progress_bar=False,
             enable_model_summary=False,
             accelerator='auto',
-            precision='16-mixed' if torch.cuda.is_available() else 32
+            precision=precision
         )
         
         try:
@@ -339,235 +340,16 @@ class BaseTrainer:
         self.use_wandb = use_wandb
         
         os.makedirs(output_dir, exist_ok=True)
-    def train(
-        self,
-        data: Optional[Dict[str, List[Dict]]] = None,
-        max_epochs: int = 10,
-        batch_size: int = 16,
-        learning_rate: float = 5e-5
-    ):
-        """Full training pipeline with optional parameters"""
         
-        console.print("[bold green]Starting base model training[/bold green]")
-          # Load data if not provided
-        if data is None:
-            console.print("[yellow]Loading data...[/yellow]")
-            if os.path.exists(self.data_dir):
-                from data_utils import load_processed_data
-                data = load_processed_data(self.data_dir)
-            else:
-                data = load_vigec_dataset()
-                from data_utils import save_processed_data
-                save_processed_data(data, self.data_dir)
-        else:
-            console.print("[yellow]Using provided data...[/yellow]")
-        
-        # Get model and tokenizer
-        model, tokenizer = get_model_and_tokenizer(self.model_name)
-        
-        # Create data loaders with custom batch size
+    def _run_hyperopt(self, base_batch_size=16, n_trials=10, study_name="vigec_hyperopt"):
+        """Internal method to run hyperparameter optimization"""
+        # Create data loaders with base batch size for hyperopt
         data_loaders = create_data_loaders(
-            data, tokenizer, batch_size=batch_size, max_length=384
+            data_dir=self.data_dir,
+            model_name=self.model_name,
+            batch_size=base_batch_size
         )
         
-        best_params = None
-        
-        # Hyperparameter optimization
-        if self.hyperopt:
-            console.print("[yellow]Running hyperparameter optimization...[/yellow]")
-            
-            optimizer = HyperparameterOptimizer(
-                model_name=self.model_name,
-                data_loaders=data_loaders,
-                n_trials=30,
-                use_wandb=self.use_wandb
-            )
-            
-            study = optimizer.optimize()
-            best_params = study.best_params
-            
-            # Save best parameters
-            with open(os.path.join(self.output_dir, "best_params.json"), "w") as f:
-                json.dump(best_params, f, indent=2)
-        
-        # Final training with best parameters
-        console.print("[yellow]Training final model with best parameters...[/yellow]")
-        
-        if best_params:
-            # Use best parameters
-            model_config = {                'model_name': self.model_name,
-                **best_params,
-                'max_steps': len(data_loaders['train']) * max_epochs,
-                'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)
-            }
-        else:
-            # Use default parameters with custom learning rate
-            model_config = {
-                'model_name': self.model_name,
-                'learning_rate': learning_rate,
-                'weight_decay': 0.01,
-                'label_smoothing': 0.1,
-                'max_steps': len(data_loaders['train']) * max_epochs,
-                'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)
-            }
-        
-        # Create final model
-        final_model = GECLightningModule(**model_config)
-        
-        # Logger
-        if self.use_wandb:
-            wandb_logger = WandbLogger(
-                project="vigec-base-training",
-                name="final_model"
-            )
-        else:
-            wandb_logger = None
-        
-        # Callbacks
-        early_stopping = EarlyStopping(
-            monitor='val_f05',
-            patience=5,
-            mode='max',
-            verbose=True
-        )
-        
-        checkpoint_callback = ModelCheckpoint(
-            dirpath=self.output_dir,
-            monitor='val_f05',
-            mode='max',
-            save_top_k=3,
-            filename='base_model_{epoch:02d}_{val_f05:.4f}'
-        )
-          # Trainer
-        trainer = L.Trainer(
-            max_epochs=max_epochs,
-            logger=wandb_logger,
-            callbacks=[early_stopping, checkpoint_callback],
-            accelerator='auto',
-            precision='16-mixed' if torch.cuda.is_available() else 32,
-            gradient_clip_val=1.0
-        )
-        
-        # Train
-        trainer.fit(
-            final_model,
-            train_dataloaders=data_loaders['train'],
-            val_dataloaders=data_loaders['validation']
-        )
-          # Save final model
-        final_model.model.save_pretrained(os.path.join(self.output_dir, "final"))
-        final_model.tokenizer.save_pretrained(os.path.join(self.output_dir, "final"))
-        
-        console.print(f"[green]Base model training completed! Model saved to {self.output_dir}[/green]")
-        
-        if self.use_wandb:
-            wandb.finish()
-    
-    def train_with_params(
-        self,
-        data: Dict[str, List[Dict]],
-        max_epochs: int = 10,
-        batch_size: int = 16,
-        learning_rate: float = 5e-5
-    ):
-        """Training method that accepts parameters from Colab notebook"""
-        console.print("[bold green]Starting base model training with custom parameters[/bold green]")
-        
-        # Get model and tokenizer
-        model, tokenizer = get_model_and_tokenizer(self.model_name)
-        
-        # Create data loaders with custom batch size
-        data_loaders = create_data_loaders(
-            data, tokenizer, batch_size=batch_size, max_length=384
-        )
-        
-        # Calculate steps
-        train_steps_per_epoch = len(data_loaders['train'])
-        max_steps = train_steps_per_epoch * max_epochs
-        warmup_steps = int(max_steps * 0.1)  # 10% warmup
-        
-        # Model configuration
-        model_config = {
-            'model_name': self.model_name,
-            'learning_rate': learning_rate,
-            'weight_decay': 0.01,
-            'label_smoothing': 0.1,
-            'max_steps': max_steps,
-            'warmup_steps': warmup_steps
-        }
-        
-        # Create model
-        final_model = GECLightningModule(**model_config)
-        
-        # Logger
-        if self.use_wandb:
-            wandb_logger = WandbLogger(
-                project="vigec-base-training",
-                name="custom_params_model"
-            )
-        else:
-            wandb_logger = None
-        
-        # Callbacks
-        early_stopping = EarlyStopping(
-            monitor='val_f05',
-            patience=5,
-            mode='max',
-            verbose=True
-        )
-        
-        checkpoint_callback = ModelCheckpoint(
-            dirpath=self.output_dir,
-            monitor='val_f05',
-            mode='max',
-            save_top_k=3,
-            filename='base_model_{epoch:02d}_{val_f05:.4f}'
-        )
-        
-        # Trainer
-        trainer = L.Trainer(
-            max_epochs=max_epochs,
-            logger=wandb_logger,
-            callbacks=[early_stopping, checkpoint_callback],
-            accelerator='auto',
-            precision='16-mixed' if torch.cuda.is_available() else 32,
-            gradient_clip_val=1.0
-        )
-        
-        # Train
-        trainer.fit(
-            final_model,
-            train_dataloaders=data_loaders['train'],
-            val_dataloaders=data_loaders['validation']
-        )
-        
-        # Save final model
-        final_model.model.save_pretrained(os.path.join(self.output_dir, "final"))
-        final_model.tokenizer.save_pretrained(os.path.join(self.output_dir, "final"))
-        
-        console.print(f"[green]Base model training completed! Model saved to {self.output_dir}[/green]")
-        
-        if self.use_wandb:
-            wandb.finish()
-    
-    def optimize_hyperparameters(
-        self,
-        data: Dict[str, List[Dict]],
-        n_trials: int = 10,
-        timeout: int = 3600
-    ):
-        """Public method for hyperparameter optimization that the Colab notebook can call"""
-        console.print(f"[bold blue]Starting hyperparameter optimization with {n_trials} trials[/bold blue]")
-        
-        # Get model and tokenizer
-        model, tokenizer = get_model_and_tokenizer(self.model_name)
-        
-        # Create data loaders
-        data_loaders = create_data_loaders(
-            data, tokenizer, batch_size=16, max_length=384
-        )
-        
-        # Create optimizer
         optimizer = HyperparameterOptimizer(
             model_name=self.model_name,
             data_loaders=data_loaders,
@@ -575,17 +357,177 @@ class BaseTrainer:
             use_wandb=self.use_wandb
         )
         
-        # Run optimization
-        study = optimizer.optimize(study_name="vigec_colab_hyperopt")
+        study = optimizer.optimize(study_name=study_name)
         
         # Save best parameters
         with open(os.path.join(self.output_dir, "best_params.json"), "w") as f:
             json.dump(study.best_params, f, indent=2)
             
-        console.print(f"[green]✅ Hyperparameter optimization completed![/green]")
-        console.print(f"[green]Best F0.5: {study.best_value:.4f}[/green]")
+        return study
+
+    def _train_model(self, data_loaders, model_config, max_epochs, run_name="final_model"):
+        """Internal method to train model with given config"""
+        # Create model
+        model = GECLightningModule(**model_config)
         
-        return study.best_params
+        # Logger
+        wandb_logger = WandbLogger(project="vigec-base-training", name=run_name) if self.use_wandb else None
+        
+        # Callbacks
+        callbacks = [
+            EarlyStopping(monitor='val_f05', patience=5, mode='max', verbose=True),
+            ModelCheckpoint(
+                dirpath=self.output_dir,
+                monitor='val_f05',
+                mode='max',
+                save_top_k=3,
+                filename=f'model_{run_name}_{{epoch:02d}}_{{val_f05:.4f}}'
+            )
+        ]
+        
+        # Trainer
+        precision = 16 if torch.cuda.is_available() else 32
+        trainer = L.Trainer(
+            max_epochs=max_epochs,
+            logger=wandb_logger,
+            callbacks=callbacks,
+            accelerator='auto',
+            precision=precision,
+            gradient_clip_val=1.0
+        )
+        
+        # Train
+        trainer.fit(
+            model,
+            train_dataloaders=data_loaders['train'],
+            val_dataloaders=data_loaders['validation']
+        )
+        
+        # Save model
+        model.model.save_pretrained(os.path.join(self.output_dir, run_name))
+        model.tokenizer.save_pretrained(os.path.join(self.output_dir, run_name))
+        
+        if self.use_wandb:
+            wandb.finish()
+            
+        return model
+
+    def train(self, max_epochs: int = 20, batch_size: int = 16):
+        """Main training method with optional hyperparameter optimization"""
+        console.print(f"[bold blue]Starting base model training for {self.model_name}[/bold blue]")
+        
+        # Load data
+        data_loaders = create_data_loaders(
+            data_dir=self.data_dir,
+            model_name=self.model_name,
+            batch_size=batch_size
+        )
+        
+        best_params = None
+          # Run hyperparameter optimization if enabled
+        if self.hyperopt:
+            console.print("[yellow]Running hyperparameter optimization...[/yellow]")
+            study = self._run_hyperopt(base_batch_size=batch_size, n_trials=10)
+            best_params = study.best_params
+            
+            console.print(f"[green]Best hyperparameters found:[/green]")
+            for key, value in best_params.items():
+                console.print(f"  {key}: {value}")
+        
+        # Train final model with best parameters
+        console.print("[yellow]Training final model...[/yellow]")
+        
+        # Filter out hyperopt-specific params and prepare model config
+        if best_params:
+            # Only pass parameters that GECLightningModule accepts
+            filtered_params = {
+                k: best_params[k] 
+                for k in ("learning_rate", "weight_decay", "label_smoothing")
+                if k in best_params
+            }
+            model_config = {
+                "model_name": self.model_name,
+                **filtered_params,
+                "max_steps": len(data_loaders["train"]) * max_epochs,
+                "warmup_steps": int(len(data_loaders["train"]) * max_epochs * 0.1),
+            }
+        else:
+            # Use default parameters
+            model_config = {
+                "model_name": self.model_name,
+                "learning_rate": 5e-5,
+                "weight_decay": 0.01,
+                "label_smoothing": 0.1,
+                "max_steps": len(data_loaders["train"]) * max_epochs,
+                "warmup_steps": int(len(data_loaders["train"]) * max_epochs * 0.1),
+            }
+        
+        # Train the model
+        model = self._train_model(
+            data_loaders=data_loaders,
+            model_config=model_config,
+            max_epochs=max_epochs,
+            run_name="base_model"
+        )
+        
+        console.print(f"[green]Training completed! Model saved to {self.output_dir}[/green]")
+        return model
+    
+    def train_with_params(
+        self, 
+        learning_rate: float = 5e-5,
+        weight_decay: float = 0.01,
+        label_smoothing: float = 0.1,
+        max_epochs: int = 20,
+        batch_size: int = 16,
+        run_name: str = "custom_model"
+    ):
+        """Train model with specific hyperparameters"""
+        console.print(f"[bold blue]Training model with custom parameters[/bold blue]")
+        
+        # Load data
+        data_loaders = create_data_loaders(
+            data_dir=self.data_dir,
+            model_name=self.model_name,
+            batch_size=batch_size
+        )
+        
+        # Prepare model config
+        model_config = {
+            "model_name": self.model_name,
+            "learning_rate": learning_rate,
+            "weight_decay": weight_decay,
+            "label_smoothing": label_smoothing,
+            "max_steps": len(data_loaders["train"]) * max_epochs,
+            "warmup_steps": int(len(data_loaders["train"]) * max_epochs * 0.1),
+        }
+          # Train the model
+        model = self._train_model(
+            data_loaders=data_loaders,
+            model_config=model_config,
+            max_epochs=max_epochs,
+            run_name=run_name
+        )
+        
+        console.print(f"[green]Training completed! Model saved to {self.output_dir}[/green]")
+        return model
+    
+    def optimize_hyperparameters(
+        self, 
+        n_trials: int = 30, 
+        batch_size: int = 16,
+        study_name: str = "vigec_colab_hyperopt"
+    ):
+        """Run only hyperparameter optimization without final training"""
+        console.print(f"[bold blue]Running hyperparameter optimization for {self.model_name}[/bold blue]")
+        
+        # Run hyperparameter optimization
+        study = self._run_hyperopt(base_batch_size=batch_size, n_trials=n_trials, study_name=study_name)
+        
+        console.print("[green]Hyperparameter optimization completed![/green]")
+        console.print(f"[green]Results saved to {self.output_dir}/best_params.json[/green]")
+        
+        return study
 
 if __name__ == "__main__":
     # Example usage

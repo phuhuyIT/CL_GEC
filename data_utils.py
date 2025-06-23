@@ -274,15 +274,33 @@ def get_model_and_tokenizer(model_name: str):
         
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-    
-    # Add special tokens if needed
+      # Add special tokens if needed
     special_tokens = ['<gec>', '</gec>']
-    new_tokens = [token for token in special_tokens if token not in tokenizer.vocab]
     
-    if new_tokens:
-        tokenizer.add_tokens(new_tokens)
-        model.resize_token_embeddings(len(tokenizer))
-        console.print(f"[yellow]Added {len(new_tokens)} new tokens[/yellow]")
+    # Safe way to check vocabulary for different tokenizer types
+    try:
+        if hasattr(tokenizer, 'vocab'):
+            # Standard tokenizers (BERT, etc.)
+            vocab = tokenizer.vocab
+        elif hasattr(tokenizer, 'get_vocab'):
+            # SentencePiece tokenizers (BARTpho, etc.)
+            vocab = tokenizer.get_vocab()
+        else:
+            # Fallback: assume all tokens are new
+            vocab = {}
+        
+        new_tokens = [token for token in special_tokens if token not in vocab]
+        
+        if new_tokens:
+            tokenizer.add_tokens(new_tokens)
+            model.resize_token_embeddings(len(tokenizer))
+            console.print(f"[yellow]Added {len(new_tokens)} new tokens[/yellow]")
+        else:
+            console.print("[blue]No new tokens needed[/blue]")
+            
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not check vocabulary - {e}[/yellow]")
+        # Skip adding special tokens if we can't check vocabulary
     
     return model, tokenizer
 

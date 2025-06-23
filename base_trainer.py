@@ -15,7 +15,7 @@ from transformers import (
 )
 import lightning as L
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
-from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
 import optuna
 from optuna.integration import PyTorchLightningPruningCallback
 import wandb
@@ -162,20 +162,29 @@ class GECLightningModule(L.LightningModule):
             if avg_f05 > self.best_f05:
                 self.best_f05 = avg_f05
                 console.print(f"[green]New best F0.5: {self.best_f05:.4f}[/green]")
-            
-            # Log examples from the first output with generation
+              # Log examples from the first output with generation
             first_gen_output = f05_outputs[0]
             for i, (src, pred, tgt) in enumerate(zip(
                 first_gen_output['sources'],
                 first_gen_output['predictions'], 
                 first_gen_output['targets']
             )):
+                # Handle different logger types
                 if hasattr(self.logger, 'experiment'):
-                    self.logger.experiment.log({
-                        f"example_{i}_source": src,
-                        f"example_{i}_prediction": pred,
-                        f"example_{i}_target": tgt
-                    })
+                    if hasattr(self.logger.experiment, 'log'):
+                        # Weights & Biases logger
+                        self.logger.experiment.log({
+                            f"example_{i}_source": src,
+                            f"example_{i}_prediction": pred,
+                            f"example_{i}_target": tgt
+                        })
+                    elif hasattr(self.logger.experiment, 'add_text'):
+                        # TensorBoard logger
+                        self.logger.experiment.add_text(
+                            f"example_{i}", 
+                            f"Source: {src}\nPrediction: {pred}\nTarget: {tgt}",
+                            self.current_epoch
+                        )
         
         # Clear outputs for next epoch
         self.validation_step_outputs.clear()
@@ -268,8 +277,7 @@ class HyperparameterOptimizer:
             warmup_steps=warmup_steps,
             max_steps=max_steps
         )
-        
-        # Logger
+          # Logger
         if self.use_wandb:
             wandb_logger = WandbLogger(
                 project="vigec-hyperopt",
@@ -278,11 +286,14 @@ class HyperparameterOptimizer:
                     **trial.params,
                     'max_steps': max_steps,
                     'warmup_steps': warmup_steps,
-                    'train_steps_per_epoch': train_steps_per_epoch
-                }
+                    'train_steps_per_epoch': train_steps_per_epoch                }
             )
         else:
-            wandb_logger = None
+            # Use TensorBoard logger for hyperopt when wandb is disabled
+            wandb_logger = TensorBoardLogger(
+                save_dir="./logs", 
+                name=f"trial_{trial.number}"
+            )
         
         # Callbacks
         early_stopping = EarlyStopping(
@@ -412,11 +423,14 @@ class BaseTrainer:
     def _train_model(self, data_loaders, model_config, max_epochs, run_name="final_model"):
         """Internal method to train model with given config"""
         # Create model
-        model = GECLightningModule(**model_config)
+        model = GECLightningModule(**model_config)        # Logger
+        if self.use_wandb:
+            wandb_logger = WandbLogger(project="vigec-base-training", name=run_name)
+        else:
+            # Use TensorBoard logger when wandb is disabled
+            wandb_logger = TensorBoardLogger(save_dir="./logs", name=run_name)
         
-        # Logger
-        wandb_logger = WandbLogger(project="vigec-base-training", name=run_name) if self.use_wandb else None
-          # Callbacks
+        # Callbacks
         callbacks = [
             EarlyStopping(monitor='val_f05', patience=5, mode='max', verbose=True),
             ModelCheckpoint(

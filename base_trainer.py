@@ -52,12 +52,14 @@ class GECLightningModule(L.LightningModule):
             ignore_index=self.tokenizer.pad_token_id,
             label_smoothing=label_smoothing
         )
-        
         # Evaluator
         self.evaluator = F05Evaluator(self.tokenizer)
         
         # Track best metrics
         self.best_f05 = 0.0
+        
+        # Store validation outputs for epoch end processing
+        self.validation_step_outputs = []
         
     def forward(self, input_ids, attention_mask, labels=None):
         outputs = self.model(
@@ -105,8 +107,7 @@ class GECLightningModule(L.LightningModule):
         )
         targets = batch['target_text']
         sources = batch['source_text']
-        
-        # Calculate F0.5
+          # Calculate F0.5
         f05_scores = []
         for pred, target, source in zip(predictions, targets, sources):
             f05 = self.evaluator.calculate_f05(source, pred, target)
@@ -117,15 +118,24 @@ class GECLightningModule(L.LightningModule):
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log('val_f05', avg_f05, on_step=False, on_epoch=True, prog_bar=True)
         
-        return {
+        # Store outputs for epoch end processing
+        output = {
             'val_loss': loss,
             'val_f05': avg_f05,
             'predictions': predictions[:5],  # Log first 5 predictions
             'targets': targets[:5],
             'sources': sources[:5]
         }
+        self.validation_step_outputs.append(output)
+        
+        return output
     
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
+        outputs = self.validation_step_outputs
+        
+        if not outputs:
+            return
+            
         avg_f05 = torch.stack([x['val_f05'] for x in outputs]).mean()
         
         if avg_f05 > self.best_f05:
@@ -139,11 +149,15 @@ class GECLightningModule(L.LightningModule):
                 outputs[0]['predictions'], 
                 outputs[0]['targets']
             )):
-                self.logger.experiment.log({
-                    f"example_{i}_source": src,
-                    f"example_{i}_prediction": pred,
-                    f"example_{i}_target": tgt
-                })
+                if hasattr(self.logger, 'experiment'):
+                    self.logger.experiment.log({
+                        f"example_{i}_source": src,
+                        f"example_{i}_prediction": pred,
+                        f"example_{i}_target": tgt
+                    })
+        
+        # Clear outputs for next epoch
+        self.validation_step_outputs.clear()
     
     def configure_optimizers(self):
         # AdamW optimizer

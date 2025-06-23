@@ -125,12 +125,12 @@ class ContrastiveLightningModule(L.LightningModule):
         temperature: float = 0.25,
         rdrop_alpha: float = 4.0,
         warmup_steps: int = 500,
-        max_steps: int = 5000,
-        **kwargs
+        max_steps: int = 5000,        **kwargs
     ):
         super().__init__()
         self.save_hyperparameters()
-          # Load base model with proper setup (including ViT5 prefix)
+        
+        # Load base model with proper setup (including ViT5 prefix)
         console.print(f"[yellow]Loading base model from {base_model_path}[/yellow]")
         self.model, self.tokenizer = get_model_and_tokenizer(base_model_path)
         
@@ -146,12 +146,14 @@ class ContrastiveLightningModule(L.LightningModule):
         )
         
         self.rdrop_loss = RDropLoss(alpha=rdrop_alpha)
-        
         # Evaluator
         self.evaluator = GECEvaluator(self.tokenizer)
         
         # Track metrics
         self.best_f05 = 0.0
+        
+        # Store validation outputs for epoch end processing
+        self.validation_step_outputs = []
         
     def forward(self, input_ids, attention_mask, labels=None):
         return self.model(
@@ -261,8 +263,7 @@ class ContrastiveLightningModule(L.LightningModule):
         )
         targets = batch['positive_text']
         sources = batch['source_text']
-        
-        # Calculate F0.5
+          # Calculate F0.5
         f05_scores = []
         for pred, target, source in zip(predictions, targets, sources):
             f05 = self.evaluator.f05_evaluator.calculate_f05(source, pred, target)
@@ -273,17 +274,24 @@ class ContrastiveLightningModule(L.LightningModule):
         self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log('val_f05', avg_f05, on_step=False, on_epoch=True, prog_bar=True)
         
-        return {
+        # Store outputs for epoch end processing
+        output = {
             'val_loss': val_loss,
             'val_f05': avg_f05,
             'predictions': predictions[:3],
             'targets': targets[:3],
-            'sources': sources[:3]
-        }
-    
-    def validation_epoch_end(self, outputs):
-        """End of validation epoch"""
+            'sources': sources[:3]        }
+        self.validation_step_outputs.append(output)
         
+        return output
+    
+    def on_validation_epoch_end(self):
+        """End of validation epoch"""
+        outputs = self.validation_step_outputs
+        
+        if not outputs:
+            return
+            
         avg_f05 = torch.stack([torch.tensor(x['val_f05']) for x in outputs]).mean()
         
         if avg_f05 > self.best_f05:
@@ -297,11 +305,15 @@ class ContrastiveLightningModule(L.LightningModule):
                 outputs[0]['predictions'],
                 outputs[0]['targets']
             )):
-                self.logger.experiment.log({
-                    f"val_example_{i}_source": src,
-                    f"val_example_{i}_prediction": pred,
-                    f"val_example_{i}_target": tgt
-                })
+                if hasattr(self.logger, 'experiment'):
+                    self.logger.experiment.log({
+                        f"val_example_{i}_source": src,
+                        f"val_example_{i}_prediction": pred,
+                        f"val_example_{i}_target": tgt
+                    })
+        
+        # Clear outputs for next epoch
+        self.validation_step_outputs.clear()
     
     def configure_optimizers(self):
         """Configure optimizers and schedulers"""

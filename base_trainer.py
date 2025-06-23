@@ -411,10 +411,16 @@ class BaseTrainer:
         
         # Load data
         console.print("[yellow]Loading data...[/yellow]")
-        train_data, val_data, test_data = load_vigec_dataset(self.data_dir)
+        data = load_vigec_dataset()
+        
+        # Get tokenizer for data loading
+        _, tokenizer = get_model_and_tokenizer(self.model_name)
+        
+        # Create data loaders
         data_loaders = create_data_loaders(
-            train_data, val_data, test_data, 
-            self.model_name, batch_size=batch_size
+            data=data,
+            tokenizer=tokenizer,
+            batch_size=batch_size
         )
         
         best_params = None
@@ -456,8 +462,7 @@ class BaseTrainer:
         
         final_model = self._train_model(
             data_loaders, model_config, max_epochs, 
-            run_name="final_model"
-        )
+            run_name="final_model"        )
         
         console.print(f"[green]Training complete! Model saved to {self.output_dir}[/green]")
         return final_model
@@ -467,10 +472,16 @@ class BaseTrainer:
         console.print(f"[bold blue]Training {self.model_name} with custom parameters[/bold blue]")
         
         # Load data
-        train_data, val_data, test_data = load_vigec_dataset(self.data_dir)
+        data = load_vigec_dataset()
+        
+        # Get tokenizer for data loading
+        _, tokenizer = get_model_and_tokenizer(self.model_name)
+        
+        # Create data loaders
         data_loaders = create_data_loaders(
-            train_data, val_data, test_data, 
-            self.model_name, batch_size=batch_size
+            data=data,
+            tokenizer=tokenizer,
+            batch_size=batch_size
         )
         
         # Filter parameters for GECLightningModule
@@ -486,7 +497,6 @@ class BaseTrainer:
             'max_steps': len(data_loaders['train']) * max_epochs,
             'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)
         }
-        
         model = self._train_model(
             data_loaders, model_config, max_epochs,
             run_name="custom_params_model"
@@ -500,10 +510,16 @@ class BaseTrainer:
         console.print(f"[bold blue]Running hyperparameter optimization for {self.model_name}[/bold blue]")
         
         # Load data
-        train_data, val_data, test_data = load_vigec_dataset(self.data_dir)
+        data = load_vigec_dataset()
+        
+        # Get tokenizer for data loading
+        _, tokenizer = get_model_and_tokenizer(self.model_name)
+        
+        # Create data loaders
         data_loaders = create_data_loaders(
-            train_data, val_data, test_data, 
-            self.model_name, batch_size=batch_size
+            data=data,
+            tokenizer=tokenizer,
+            batch_size=batch_size
         )
         
         study = self._run_hyperopt(

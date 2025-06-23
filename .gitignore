@@ -6,3 +6,4 @@ BASE_TRAINER_FIX.md
 verify_train_fix.py
 TRAIN_METHOD_FIX.md
 LIGHTNING_2X_MIGRATION_FIX.md
+run_colab.ipynb

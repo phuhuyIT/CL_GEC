@@ -234,6 +234,8 @@ class HyperparameterOptimizer:
     def objective(self, trial: optuna.Trial) -> float:
         """Objective function for Optuna optimization"""
         
+        console.print(f"\n[bold cyan]🔍 Starting Trial {trial.number}[/bold cyan]")
+        
         # Suggest hyperparameters
         lr = trial.suggest_float('learning_rate', 1e-6, 1e-3, log=True)
         weight_decay = trial.suggest_float('weight_decay', 0.001, 0.1, log=True)
@@ -241,9 +243,17 @@ class HyperparameterOptimizer:
         batch_size = trial.suggest_categorical('batch_size', [8, 16, 32])
         warmup_ratio = trial.suggest_float('warmup_ratio', 0.05, 0.2)
         
+        console.print(f"[yellow]📋 Trial {trial.number} parameters:[/yellow]")
+        console.print(f"  Learning rate: {lr:.2e}")
+        console.print(f"  Weight decay: {weight_decay:.4f}")
+        console.print(f"  Label smoothing: {label_smoothing:.3f}")
+        console.print(f"  Batch size: {batch_size}")
+        console.print(f"  Warmup ratio: {warmup_ratio:.3f}")
+        
         # Recreate data loaders with the suggested batch size
         # This is crucial - batch size affects convergence and memory usage
         try:
+            console.print(f"[blue]🔄 Creating data loaders with batch size {batch_size}...[/blue]")
             from data_utils import create_data_loaders, get_model_and_tokenizer
             # Need to get tokenizer to recreate data loaders
             _, tokenizer = get_model_and_tokenizer(self.model_name)
@@ -258,17 +268,24 @@ class HyperparameterOptimizer:
                 tokenizer=tokenizer,
                 batch_size=batch_size
             )
+            console.print(f"[green]✅ Data loaders created successfully[/green]")
         except Exception as e:
-            console.print(f"[red]Failed to create data loaders for trial {trial.number}: {e}[/red]")
+            console.print(f"[red]❌ Failed to create data loaders for trial {trial.number}: {e}[/red]")
             return 0.0
-        
-        # Calculate steps based on actual data loader length
+          # Calculate steps based on actual data loader length
         train_steps_per_epoch = len(trial_data_loaders['train'])
         max_epochs = 5  # Coarse search with fewer epochs
         max_steps = train_steps_per_epoch * max_epochs
         warmup_steps = int(max_steps * warmup_ratio)
         
+        console.print(f"[blue]📊 Training setup:[/blue]")
+        console.print(f"  Steps per epoch: {train_steps_per_epoch}")
+        console.print(f"  Max epochs: {max_epochs}")
+        console.print(f"  Total steps: {max_steps}")
+        console.print(f"  Warmup steps: {warmup_steps}")
+        
         # Create model with all hyperparameters
+        console.print(f"[blue]🤖 Creating model...[/blue]")
         model = GECLightningModule(
             model_name=self.model_name,
             learning_rate=lr,
@@ -277,7 +294,9 @@ class HyperparameterOptimizer:
             warmup_steps=warmup_steps,
             max_steps=max_steps
         )
-          # Logger
+        console.print(f"[green]✅ Model created successfully[/green]")
+        
+        # Logger
         if self.use_wandb:
             wandb_logger = WandbLogger(
                 project="vigec-hyperopt",
@@ -313,20 +332,21 @@ class HyperparameterOptimizer:
             save_top_k=1,
             filename=f'trial_{trial.number}_best'
         )
-        
-        # Trainer
+          # Trainer with progress bars enabled for better visibility
         precision = "16-mixed" if torch.cuda.is_available() else "32-true"
         trainer = L.Trainer(
             max_epochs=max_epochs,
             logger=wandb_logger,
             callbacks=[early_stopping, pruning_callback, checkpoint_callback],
-            enable_progress_bar=False,
-            enable_model_summary=False,
+            enable_progress_bar=True,   # Enable progress bars for hyperopt visibility
+            enable_model_summary=False, # Keep model summary disabled to reduce clutter
             accelerator='auto',
             precision=precision
         )
         
         try:
+            console.print(f"[bold green]🚀 Starting training for Trial {trial.number}...[/bold green]")
+            
             # Train with trial-specific data loaders
             trainer.fit(
                 model,
@@ -336,6 +356,7 @@ class HyperparameterOptimizer:
             
             # Get best metric
             best_f05 = model.best_f05
+            console.print(f"[bold green]✅ Trial {trial.number} completed! Best F0.5: {best_f05:.4f}[/bold green]")
             
             # Clean up
             if self.use_wandb:
@@ -344,7 +365,7 @@ class HyperparameterOptimizer:
             return best_f05
             
         except Exception as e:
-            console.print(f"[red]Trial {trial.number} failed: {e}[/red]")
+            console.print(f"[red]❌ Trial {trial.number} failed: {e}[/red]")
             if self.use_wandb:
                 wandb.finish()
             return 0.0
@@ -361,16 +382,28 @@ class HyperparameterOptimizer:
             storage=f"sqlite:///{study_name}.db",
             load_if_exists=True
         )
+          # Progress tracking callback
+        def progress_callback(study, trial):
+            console.print(f"\n[bold yellow]📊 Trial {trial.number} Summary:[/bold yellow]")
+            console.print(f"  F0.5 Score: {trial.value:.4f}")
+            console.print(f"  Best so far: {study.best_value:.4f} (Trial {study.best_trial.number})")
+            console.print(f"  Progress: {len(study.trials)}/{self.n_trials} trials completed")
+            
+            if len(study.trials) > 1:
+                recent_trials = study.trials[-5:]  # Last 5 trials
+                recent_scores = [t.value for t in recent_trials if t.value is not None]
+                if recent_scores:
+                    avg_recent = sum(recent_scores) / len(recent_scores)
+                    console.print(f"  Recent average: {avg_recent:.4f}")
+            
+            console.print("-" * 60)
         
         # Optimize
+        console.print(f"[bold green]🚀 Starting optimization process...[/bold green]")
         study.optimize(
             self.objective,
             n_trials=self.n_trials,
-            callbacks=[
-                lambda study, trial: console.print(
-                    f"[yellow]Trial {trial.number}: F0.5 = {trial.value:.4f}[/yellow]"
-                )
-            ]
+            callbacks=[progress_callback]
         )
         
         # Print results

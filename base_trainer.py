@@ -90,44 +90,61 @@ class GECLightningModule(L.LightningModule):
         
         loss = outputs.loss
         
-        # Generate predictions for evaluation
-        with torch.no_grad():
-            generated_ids = self.model.generate(
-                input_ids=batch['input_ids'],
-                attention_mask=batch['attention_mask'],
-                max_length=384,
-                num_beams=5,
-                early_stopping=True,
-                do_sample=False
-            )
-        
-        # Decode predictions and targets
-        predictions = self.tokenizer.batch_decode(
-            generated_ids, skip_special_tokens=True
+        # Only do expensive generation and F0.5 calculation for a small subset
+        # This dramatically speeds up validation while still providing metrics
+        do_generation = (
+            batch_idx == 0 or  # Always do first batch for examples
+            batch_idx % 50 == 0  # Every 50th batch for periodic F0.5 monitoring
         )
-        targets = batch['target_text']
-        sources = batch['source_text']
-          # Calculate F0.5
-        f05_scores = []
-        for pred, target, source in zip(predictions, targets, sources):
-            f05 = self.evaluator.calculate_f05(source, pred, target)
-            f05_scores.append(f05)
         
-        avg_f05 = float(np.mean(f05_scores))  # Convert to Python float
+        if do_generation:
+            # Generate predictions for evaluation (much faster settings)
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    input_ids=batch['input_ids'],
+                    attention_mask=batch['attention_mask'],
+                    max_length=384,  
+                    num_beams=3,     # Reduced from 5
+                    early_stopping=True,
+                    do_sample=False
+                )
+            
+            # Decode predictions and targets
+            predictions = self.tokenizer.batch_decode(
+                generated_ids, skip_special_tokens=True
+            )
+            targets = batch['target_text']
+            sources = batch['source_text']
+            
+            # Calculate F0.5 for this batch
+            f05_scores = []
+            for pred, target, source in zip(predictions, targets, sources):
+                f05 = self.evaluator.calculate_f05(source, pred, target)
+                f05_scores.append(f05)
+            
+            avg_f05 = float(np.mean(f05_scores))
+            
+            # Store outputs for epoch end processing
+            output = {
+                'val_loss': loss,
+                'val_f05': avg_f05,
+                'predictions': predictions[:3],  # Reduced from 5
+                'targets': targets[:3],
+                'sources': sources[:3],
+                'has_generation': True
+            }
+        else:
+            # Fast validation step - only compute loss
+            output = {
+                'val_loss': loss,
+                'val_f05': None,  # Will be ignored in epoch end
+                'has_generation': False            }
         
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_f05', avg_f05, on_step=False, on_epoch=True, prog_bar=True)
+        if do_generation:
+            self.log('val_f05', avg_f05, on_step=False, on_epoch=True, prog_bar=True)
         
-        # Store outputs for epoch end processing
-        output = {
-            'val_loss': loss,
-            'val_f05': avg_f05,
-            'predictions': predictions[:5],  # Log first 5 predictions
-            'targets': targets[:5],
-            'sources': sources[:5]
-        }
         self.validation_step_outputs.append(output)
-        
         return output
     
     def on_validation_epoch_end(self):
@@ -135,19 +152,23 @@ class GECLightningModule(L.LightningModule):
         
         if not outputs:
             return
+        
+        # Only calculate F0.5 from outputs that have generation
+        f05_outputs = [x for x in outputs if x.get('has_generation', False) and x['val_f05'] is not None]
+        
+        if f05_outputs:
+            avg_f05 = torch.tensor([x['val_f05'] for x in f05_outputs]).mean()
             
-        avg_f05 = torch.tensor([x['val_f05'] for x in outputs]).mean()
-        
-        if avg_f05 > self.best_f05:
-            self.best_f05 = avg_f05
-            console.print(f"[green]New best F0.5: {self.best_f05:.4f}[/green]")
-        
-        # Log examples
-        if outputs:
+            if avg_f05 > self.best_f05:
+                self.best_f05 = avg_f05
+                console.print(f"[green]New best F0.5: {self.best_f05:.4f}[/green]")
+            
+            # Log examples from the first output with generation
+            first_gen_output = f05_outputs[0]
             for i, (src, pred, tgt) in enumerate(zip(
-                outputs[0]['sources'],
-                outputs[0]['predictions'], 
-                outputs[0]['targets']
+                first_gen_output['sources'],
+                first_gen_output['predictions'], 
+                first_gen_output['targets']
             )):
                 if hasattr(self.logger, 'experiment'):
                     self.logger.experiment.log({
@@ -211,27 +232,54 @@ class HyperparameterOptimizer:
         batch_size = trial.suggest_categorical('batch_size', [8, 16, 32])
         warmup_ratio = trial.suggest_float('warmup_ratio', 0.05, 0.2)
         
-        # Calculate steps
-        train_steps_per_epoch = len(self.data_loaders['train'])
+        # Recreate data loaders with the suggested batch size
+        # This is crucial - batch size affects convergence and memory usage
+        try:
+            from data_utils import create_data_loaders, get_model_and_tokenizer
+            # Need to get tokenizer to recreate data loaders
+            _, tokenizer = get_model_and_tokenizer(self.model_name)
+            
+            # Load data fresh for this trial
+            from data_utils import load_vigec_dataset
+            data = load_vigec_dataset()
+            
+            # Create data loaders with trial-specific batch size
+            trial_data_loaders = create_data_loaders(
+                data=data,
+                tokenizer=tokenizer,
+                batch_size=batch_size
+            )
+        except Exception as e:
+            console.print(f"[red]Failed to create data loaders for trial {trial.number}: {e}[/red]")
+            return 0.0
+        
+        # Calculate steps based on actual data loader length
+        train_steps_per_epoch = len(trial_data_loaders['train'])
         max_epochs = 5  # Coarse search with fewer epochs
         max_steps = train_steps_per_epoch * max_epochs
         warmup_steps = int(max_steps * warmup_ratio)
         
-        # Create model
+        # Create model with all hyperparameters
         model = GECLightningModule(
             model_name=self.model_name,
             learning_rate=lr,
             weight_decay=weight_decay,
             label_smoothing=label_smoothing,
             warmup_steps=warmup_steps,
-            max_steps=max_steps        )
+            max_steps=max_steps
+        )
         
         # Logger
         if self.use_wandb:
             wandb_logger = WandbLogger(
                 project="vigec-hyperopt",
                 name=f"trial_{trial.number}",
-                config=trial.params
+                config={
+                    **trial.params,
+                    'max_steps': max_steps,
+                    'warmup_steps': warmup_steps,
+                    'train_steps_per_epoch': train_steps_per_epoch
+                }
             )
         else:
             wandb_logger = None
@@ -252,7 +300,8 @@ class HyperparameterOptimizer:
             monitor='val_f05',
             mode='max',
             save_top_k=1,
-            filename=f'trial_{trial.number}_best'        )
+            filename=f'trial_{trial.number}_best'
+        )
         
         # Trainer
         precision = "16-mixed" if torch.cuda.is_available() else "32-true"
@@ -267,13 +316,14 @@ class HyperparameterOptimizer:
         )
         
         try:
-            # Train
+            # Train with trial-specific data loaders
             trainer.fit(
                 model,
-                train_dataloaders=self.data_loaders['train'],
-                val_dataloaders=self.data_loaders['validation']
+                train_dataloaders=trial_data_loaders['train'],
+                val_dataloaders=trial_data_loaders['validation']
             )
-              # Get best metric
+            
+            # Get best metric
             best_f05 = model.best_f05
             
             # Clean up
@@ -366,8 +416,7 @@ class BaseTrainer:
         
         # Logger
         wandb_logger = WandbLogger(project="vigec-base-training", name=run_name) if self.use_wandb else None
-        
-        # Callbacks
+          # Callbacks
         callbacks = [
             EarlyStopping(monitor='val_f05', patience=5, mode='max', verbose=True),
             ModelCheckpoint(
@@ -376,7 +425,8 @@ class BaseTrainer:
                 mode='max',
                 save_top_k=3,
                 filename=f'model_{run_name}_{{epoch:02d}}_{{val_f05:.4f}}'
-            )        ]
+            )
+        ]
         
         # Trainer
         precision = "16-mixed" if torch.cuda.is_available() else "32-true"
@@ -404,14 +454,24 @@ class BaseTrainer:
             wandb.finish()
             
         return model
-
+    
     def train(self, max_epochs: int = 10, batch_size: int = 16):
         """Main training method with optional hyperparameter optimization"""
         console.print(f"[bold blue]Starting training for {self.model_name}[/bold blue]")
         
-        # Load data
+        # Load data with proper data directory
         console.print("[yellow]Loading data...[/yellow]")
-        data = load_vigec_dataset()
+        try:
+            # Pass data_dir if the function supports it
+            import inspect
+            load_func_signature = inspect.signature(load_vigec_dataset)
+            if 'data_dir' in load_func_signature.parameters:
+                data = load_vigec_dataset(data_dir=self.data_dir)
+            else:
+                data = load_vigec_dataset()
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not use data_dir parameter: {e}[/yellow]")
+            data = load_vigec_dataset()
         
         # Get tokenizer for data loading
         _, tokenizer = get_model_and_tokenizer(self.model_name)
@@ -436,18 +496,22 @@ class BaseTrainer:
         console.print("[yellow]Training final model...[/yellow]")
         
         if best_params:
-            # Filter only the parameters that GECLightningModule accepts
+            # Filter parameters that GECLightningModule accepts - include more parameters
             filtered_params = {
                 k: best_params[k] 
-                for k in ['learning_rate', 'weight_decay', 'label_smoothing'] 
+                for k in ['learning_rate', 'weight_decay', 'label_smoothing', 'warmup_ratio'] 
                 if k in best_params
             }
+              # Handle warmup_ratio if present
+            warmup_steps = int(len(data_loaders['train']) * max_epochs * 0.1)  # default
+            if 'warmup_ratio' in filtered_params:
+                warmup_steps = int(len(data_loaders['train']) * max_epochs * filtered_params.pop('warmup_ratio'))
             
             model_config = {
                 'model_name': self.model_name,
                 **filtered_params,
                 'max_steps': len(data_loaders['train']) * max_epochs,
-                'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)
+                'warmup_steps': warmup_steps
             }
         else:
             # Use default parameters
@@ -462,7 +526,8 @@ class BaseTrainer:
         
         final_model = self._train_model(
             data_loaders, model_config, max_epochs, 
-            run_name="final_model"        )
+            run_name="final_model"
+        )
         
         console.print(f"[green]Training complete! Model saved to {self.output_dir}[/green]")
         return final_model
@@ -471,31 +536,48 @@ class BaseTrainer:
         """Train model with specific hyperparameters"""
         console.print(f"[bold blue]Training {self.model_name} with custom parameters[/bold blue]")
         
-        # Load data
-        data = load_vigec_dataset()
+        # Load data with proper data directory
+        try:
+            import inspect
+            load_func_signature = inspect.signature(load_vigec_dataset)
+            if 'data_dir' in load_func_signature.parameters:
+                data = load_vigec_dataset(data_dir=self.data_dir)
+            else:
+                data = load_vigec_dataset()
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not use data_dir parameter: {e}[/yellow]")
+            data = load_vigec_dataset()
         
         # Get tokenizer for data loading
         _, tokenizer = get_model_and_tokenizer(self.model_name)
+        
+        # Use batch_size from params if available, otherwise use the parameter
+        effective_batch_size = params.get('batch_size', batch_size)
         
         # Create data loaders
         data_loaders = create_data_loaders(
             data=data,
             tokenizer=tokenizer,
-            batch_size=batch_size
+            batch_size=effective_batch_size
         )
         
-        # Filter parameters for GECLightningModule
+        # Filter parameters for GECLightningModule and handle warmup_ratio
         filtered_params = {
             k: params[k] 
             for k in ['learning_rate', 'weight_decay', 'label_smoothing'] 
             if k in params
         }
         
+        # Handle warmup_ratio if present
+        warmup_steps = int(len(data_loaders['train']) * max_epochs * 0.1)  # default
+        if 'warmup_ratio' in params:
+            warmup_steps = int(len(data_loaders['train']) * max_epochs * params['warmup_ratio'])
+        
         model_config = {
             'model_name': self.model_name,
             **filtered_params,
             'max_steps': len(data_loaders['train']) * max_epochs,
-            'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)
+            'warmup_steps': warmup_steps
         }
         model = self._train_model(
             data_loaders, model_config, max_epochs,
@@ -509,8 +591,17 @@ class BaseTrainer:
         """Run only hyperparameter optimization"""
         console.print(f"[bold blue]Running hyperparameter optimization for {self.model_name}[/bold blue]")
         
-        # Load data
-        data = load_vigec_dataset()
+        # Load data with proper data directory
+        try:
+            import inspect
+            load_func_signature = inspect.signature(load_vigec_dataset)
+            if 'data_dir' in load_func_signature.parameters:
+                data = load_vigec_dataset(data_dir=self.data_dir)
+            else:
+                data = load_vigec_dataset()
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not use data_dir parameter: {e}[/yellow]")
+            data = load_vigec_dataset()
         
         # Get tokenizer for data loading
         _, tokenizer = get_model_and_tokenizer(self.model_name)

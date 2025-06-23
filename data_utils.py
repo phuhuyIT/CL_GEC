@@ -171,9 +171,22 @@ def clean_text(text: str) -> str:
 def load_vigec_dataset(
     dataset_name: str = "phuhuy-se1/viGEC",
     cache_dir: Optional[str] = None,
+    train_subset_ratio: float = 1.0,
+    validation_subset_ratio: float = 1.0,
     test_subset_ratio: float = 0.05
 ) -> Dict[str, List[Dict]]:
-    """Load and preprocess viGEC dataset"""
+    """Load and preprocess viGEC dataset
+    
+    Args:
+        dataset_name: HuggingFace dataset identifier
+        cache_dir: Directory to cache the dataset
+        train_subset_ratio: Ratio of training data to use (0.0-1.0, default 1.0)
+        validation_subset_ratio: Ratio of validation data to use (0.0-1.0, default 1.0) 
+        test_subset_ratio: Ratio of test data to use (0.0-1.0, default 0.05)
+    
+    Returns:
+        Dictionary with 'train', 'validation', 'test' splits
+    """
     
     console.print(f"[bold blue]Loading dataset: {dataset_name}[/bold blue]")
     
@@ -201,14 +214,19 @@ def load_vigec_dataset(
                     'target': target,
                     'id': item.get('id', len(split_data))
                 })
+              # Apply subset ratio for faster processing if specified
+            subset_ratios = {
+                'train': train_subset_ratio,
+                'validation': validation_subset_ratio,
+                'test': test_subset_ratio
+            }
             
-            # For test split, use only a subset for faster evaluation
-            if split == 'test' and test_subset_ratio < 1.0:
+            if split in subset_ratios and subset_ratios[split] < 1.0:
                 import random
                 random.seed(42)  # For reproducibility
-                subset_size = int(len(split_data) * test_subset_ratio)
+                subset_size = int(len(split_data) * subset_ratios[split])
                 split_data = random.sample(split_data, subset_size)
-                console.print(f"[blue]Using {subset_size} samples ({test_subset_ratio*100:.1f}%) from test set[/blue]")
+                console.print(f"[blue]Using {subset_size} samples ({subset_ratios[split]*100:.1f}%) from {split} set[/blue]")
             
             processed_data[split] = split_data
             console.print(f"[green]{split}: {len(split_data)} samples[/green]")

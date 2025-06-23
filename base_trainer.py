@@ -235,13 +235,15 @@ class HyperparameterOptimizer:
         """Objective function for Optuna optimization"""
         
         console.print(f"\n[bold cyan]🔍 Starting Trial {trial.number}[/bold cyan]")
-        
-        # Suggest hyperparameters
+          # Suggest hyperparameters
         lr = trial.suggest_float('learning_rate', 1e-6, 1e-3, log=True)
         weight_decay = trial.suggest_float('weight_decay', 0.001, 0.1, log=True)
         label_smoothing = trial.suggest_float('label_smoothing', 0.0, 0.3)
-        batch_size = trial.suggest_categorical('batch_size', [8, 16, 32])
+        batch_size = trial.suggest_categorical('batch_size', [16, 48, 96])
         warmup_ratio = trial.suggest_float('warmup_ratio', 0.05, 0.2)
+        
+        # Apply batch size dependent learning rate scaling (optional)
+        # lr_scaled = lr * (batch_size / 16)  # Scale relative to base batch_size=16
         
         console.print(f"[yellow]📋 Trial {trial.number} parameters:[/yellow]")
         console.print(f"  Learning rate: {lr:.2e}")

@@ -8,11 +8,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.optim import AdamW
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
-    get_linear_schedule_with_warmup,
-    AdamW
+    get_linear_schedule_with_warmup
 )
 import lightning as L
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint

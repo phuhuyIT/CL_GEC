@@ -252,11 +252,10 @@ class HyperparameterOptimizer:
             monitor='val_f05',
             mode='max',
             save_top_k=1,
-            filename=f'trial_{trial.number}_best'
-        )
+            filename=f'trial_{trial.number}_best'        )
         
         # Trainer
-        precision = 16 if torch.cuda.is_available() else 32
+        precision = "16-mixed" if torch.cuda.is_available() else "32-true"
         trainer = L.Trainer(
             max_epochs=max_epochs,
             logger=wandb_logger,
@@ -341,15 +340,8 @@ class BaseTrainer:
         
         os.makedirs(output_dir, exist_ok=True)
         
-    def _run_hyperopt(self, base_batch_size=16, n_trials=10, study_name="vigec_hyperopt"):
+    def _run_hyperopt(self, data_loaders, n_trials=10, study_name="vigec_hyperopt"):
         """Internal method to run hyperparameter optimization"""
-        # Create data loaders with base batch size for hyperopt
-        data_loaders = create_data_loaders(
-            data_dir=self.data_dir,
-            model_name=self.model_name,
-            batch_size=base_batch_size
-        )
-        
         optimizer = HyperparameterOptimizer(
             model_name=self.model_name,
             data_loaders=data_loaders,
@@ -360,8 +352,10 @@ class BaseTrainer:
         study = optimizer.optimize(study_name=study_name)
         
         # Save best parameters
-        with open(os.path.join(self.output_dir, "best_params.json"), "w") as f:
+        best_params_path = os.path.join(self.output_dir, "best_params.json")
+        with open(best_params_path, "w") as f:
             json.dump(study.best_params, f, indent=2)
+        console.print(f"[green]Best parameters saved to {best_params_path}[/green]")
             
         return study
 
@@ -382,11 +376,10 @@ class BaseTrainer:
                 mode='max',
                 save_top_k=3,
                 filename=f'model_{run_name}_{{epoch:02d}}_{{val_f05:.4f}}'
-            )
-        ]
+            )        ]
         
         # Trainer
-        precision = 16 if torch.cuda.is_available() else 32
+        precision = "16-mixed" if torch.cuda.is_available() else "32-true"
         trainer = L.Trainer(
             max_epochs=max_epochs,
             logger=wandb_logger,
@@ -412,120 +405,115 @@ class BaseTrainer:
             
         return model
 
-    def train(self, max_epochs: int = 20, batch_size: int = 16):
+    def train(self, max_epochs: int = 10, batch_size: int = 16):
         """Main training method with optional hyperparameter optimization"""
-        console.print(f"[bold blue]Starting base model training for {self.model_name}[/bold blue]")
+        console.print(f"[bold blue]Starting training for {self.model_name}[/bold blue]")
         
         # Load data
+        console.print("[yellow]Loading data...[/yellow]")
+        train_data, val_data, test_data = load_vigec_dataset(self.data_dir)
         data_loaders = create_data_loaders(
-            data_dir=self.data_dir,
-            model_name=self.model_name,
-            batch_size=batch_size
+            train_data, val_data, test_data, 
+            self.model_name, batch_size=batch_size
         )
         
         best_params = None
-          # Run hyperparameter optimization if enabled
+        
+        # Step 1: Hyperparameter optimization (if enabled)
         if self.hyperopt:
             console.print("[yellow]Running hyperparameter optimization...[/yellow]")
-            study = self._run_hyperopt(base_batch_size=batch_size, n_trials=10)
+            study = self._run_hyperopt(data_loaders, n_trials=10)
             best_params = study.best_params
-            
-            console.print(f"[green]Best hyperparameters found:[/green]")
-            for key, value in best_params.items():
-                console.print(f"  {key}: {value}")
+            console.print(f"[green]Hyperparameter optimization complete. Best F0.5: {study.best_value:.4f}[/green]")
         
-        # Train final model with best parameters
+        # Step 2: Final training with best parameters
         console.print("[yellow]Training final model...[/yellow]")
         
-        # Filter out hyperopt-specific params and prepare model config
         if best_params:
-            # Only pass parameters that GECLightningModule accepts
+            # Filter only the parameters that GECLightningModule accepts
             filtered_params = {
                 k: best_params[k] 
-                for k in ("learning_rate", "weight_decay", "label_smoothing")
+                for k in ['learning_rate', 'weight_decay', 'label_smoothing'] 
                 if k in best_params
             }
+            
             model_config = {
-                "model_name": self.model_name,
+                'model_name': self.model_name,
                 **filtered_params,
-                "max_steps": len(data_loaders["train"]) * max_epochs,
-                "warmup_steps": int(len(data_loaders["train"]) * max_epochs * 0.1),
+                'max_steps': len(data_loaders['train']) * max_epochs,
+                'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)
             }
         else:
             # Use default parameters
             model_config = {
-                "model_name": self.model_name,
-                "learning_rate": 5e-5,
-                "weight_decay": 0.01,
-                "label_smoothing": 0.1,
-                "max_steps": len(data_loaders["train"]) * max_epochs,
-                "warmup_steps": int(len(data_loaders["train"]) * max_epochs * 0.1),
+                'model_name': self.model_name,
+                'learning_rate': 5e-5,
+                'weight_decay': 0.01,
+                'label_smoothing': 0.1,
+                'max_steps': len(data_loaders['train']) * max_epochs,
+                'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)
             }
         
-        # Train the model
-        model = self._train_model(
-            data_loaders=data_loaders,
-            model_config=model_config,
-            max_epochs=max_epochs,
-            run_name="base_model"
+        final_model = self._train_model(
+            data_loaders, model_config, max_epochs, 
+            run_name="final_model"
         )
         
-        console.print(f"[green]Training completed! Model saved to {self.output_dir}[/green]")
-        return model
+        console.print(f"[green]Training complete! Model saved to {self.output_dir}[/green]")
+        return final_model
     
-    def train_with_params(
-        self, 
-        learning_rate: float = 5e-5,
-        weight_decay: float = 0.01,
-        label_smoothing: float = 0.1,
-        max_epochs: int = 20,
-        batch_size: int = 16,
-        run_name: str = "custom_model"
-    ):
+    def train_with_params(self, params: Dict[str, Any], max_epochs: int = 10, batch_size: int = 16):
         """Train model with specific hyperparameters"""
-        console.print(f"[bold blue]Training model with custom parameters[/bold blue]")
+        console.print(f"[bold blue]Training {self.model_name} with custom parameters[/bold blue]")
         
         # Load data
+        train_data, val_data, test_data = load_vigec_dataset(self.data_dir)
         data_loaders = create_data_loaders(
-            data_dir=self.data_dir,
-            model_name=self.model_name,
-            batch_size=batch_size
+            train_data, val_data, test_data, 
+            self.model_name, batch_size=batch_size
         )
         
-        # Prepare model config
-        model_config = {
-            "model_name": self.model_name,
-            "learning_rate": learning_rate,
-            "weight_decay": weight_decay,
-            "label_smoothing": label_smoothing,
-            "max_steps": len(data_loaders["train"]) * max_epochs,
-            "warmup_steps": int(len(data_loaders["train"]) * max_epochs * 0.1),
+        # Filter parameters for GECLightningModule
+        filtered_params = {
+            k: params[k] 
+            for k in ['learning_rate', 'weight_decay', 'label_smoothing'] 
+            if k in params
         }
-          # Train the model
+        
+        model_config = {
+            'model_name': self.model_name,
+            **filtered_params,
+            'max_steps': len(data_loaders['train']) * max_epochs,
+            'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)
+        }
+        
         model = self._train_model(
-            data_loaders=data_loaders,
-            model_config=model_config,
-            max_epochs=max_epochs,
-            run_name=run_name
+            data_loaders, model_config, max_epochs,
+            run_name="custom_params_model"
         )
         
-        console.print(f"[green]Training completed! Model saved to {self.output_dir}[/green]")
+        console.print(f"[green]Training complete! Model saved to {self.output_dir}[/green]")
         return model
     
-    def optimize_hyperparameters(
-        self, 
-        n_trials: int = 30, 
-        batch_size: int = 16,
-        study_name: str = "vigec_colab_hyperopt"
-    ):
-        """Run only hyperparameter optimization without final training"""
+    def optimize_hyperparameters(self, n_trials: int = 30, batch_size: int = 16):
+        """Run only hyperparameter optimization"""
         console.print(f"[bold blue]Running hyperparameter optimization for {self.model_name}[/bold blue]")
         
-        # Run hyperparameter optimization
-        study = self._run_hyperopt(base_batch_size=batch_size, n_trials=n_trials, study_name=study_name)
+        # Load data
+        train_data, val_data, test_data = load_vigec_dataset(self.data_dir)
+        data_loaders = create_data_loaders(
+            train_data, val_data, test_data, 
+            self.model_name, batch_size=batch_size
+        )
         
-        console.print("[green]Hyperparameter optimization completed![/green]")
-        console.print(f"[green]Results saved to {self.output_dir}/best_params.json[/green]")
+        study = self._run_hyperopt(
+            data_loaders, n_trials=n_trials, 
+            study_name="vigec_standalone_hyperopt"
+        )
+        
+        console.print(f"[green]Hyperparameter optimization complete![/green]")
+        console.print(f"[green]Best trial: {study.best_trial.number}[/green]")
+        console.print(f"[green]Best F0.5: {study.best_value:.4f}[/green]")
         
         return study
 

@@ -1,0 +1,42 @@
+# Core dependencies
+torch>=1.12.0
+transformers==4.36.0
+datasets==2.15.0
+accelerate==0.25.0
+
+# Tokenization
+sentencepiece
+tokenizers
+
+# Vietnamese NLP
+underthesea
+pyvi
+
+# Training and optimization
+lightning>=2.0.0
+pytorch-lightning>=2.0.0
+optuna>=3.4.0
+
+# Monitoring and logging
+wandb>=0.16.0
+rich
+
+# Evaluation
+nltk
+sacrebleu
+evaluate
+rouge-score
+
+# Data processing
+pandas
+numpy>=1.21.0,<2.0.0
+scikit-learn
+
+# Configuration
+omegaconf
+
+# Utilities
+tqdm
+ipywidgets
+matplotlib
+seaborn

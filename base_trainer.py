@@ -325,27 +325,35 @@ class BaseTrainer:
         self.use_wandb = use_wandb
         
         os.makedirs(output_dir, exist_ok=True)
-        
-    def train(self):
-        """Full training pipeline"""
+    def train(
+        self,
+        data: Optional[Dict[str, List[Dict]]] = None,
+        max_epochs: int = 10,
+        batch_size: int = 16,
+        learning_rate: float = 5e-5
+    ):
+        """Full training pipeline with optional parameters"""
         
         console.print("[bold green]Starting base model training[/bold green]")
-        
-        # Load data
-        console.print("[yellow]Loading data...[/yellow]")
-        if os.path.exists(self.data_dir):
-            from data_utils import load_processed_data
-            data = load_processed_data(self.data_dir)
+          # Load data if not provided
+        if data is None:
+            console.print("[yellow]Loading data...[/yellow]")
+            if os.path.exists(self.data_dir):
+                from data_utils import load_processed_data
+                data = load_processed_data(self.data_dir)
+            else:
+                data = load_vigec_dataset()
+                from data_utils import save_processed_data
+                save_processed_data(data, self.data_dir)
         else:
-            data = load_vigec_dataset()
-            from data_utils import save_processed_data
-            save_processed_data(data, self.data_dir)
+            console.print("[yellow]Using provided data...[/yellow]")
         
         # Get model and tokenizer
         model, tokenizer = get_model_and_tokenizer(self.model_name)
-          # Create data loaders
+        
+        # Create data loaders with custom batch size
         data_loaders = create_data_loaders(
-            data, tokenizer, batch_size=16, max_length=384
+            data, tokenizer, batch_size=batch_size, max_length=384
         )
         
         best_params = None
@@ -373,23 +381,23 @@ class BaseTrainer:
         
         if best_params:
             # Use best parameters
-            model_config = {
-                'model_name': self.model_name,
+            model_config = {                'model_name': self.model_name,
                 **best_params,
-                'max_steps': len(data_loaders['train']) * 10,  # 10 epochs
-                'warmup_steps': int(len(data_loaders['train']) * 10 * 0.1)
+                'max_steps': len(data_loaders['train']) * max_epochs,
+                'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)
             }
         else:
-            # Use default parameters
+            # Use default parameters with custom learning rate
             model_config = {
                 'model_name': self.model_name,
-                'learning_rate': 5e-5,
+                'learning_rate': learning_rate,
                 'weight_decay': 0.01,
                 'label_smoothing': 0.1,
-                'max_steps': len(data_loaders['train']) * 10,
-                'warmup_steps': int(len(data_loaders['train']) * 10 * 0.1)
+                'max_steps': len(data_loaders['train']) * max_epochs,
+                'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)
             }
-          # Create final model
+        
+        # Create final model
         final_model = GECLightningModule(**model_config)
         
         # Logger
@@ -416,10 +424,9 @@ class BaseTrainer:
             save_top_k=3,
             filename='base_model_{epoch:02d}_{val_f05:.4f}'
         )
-        
-        # Trainer
+          # Trainer
         trainer = L.Trainer(
-            max_epochs=10,
+            max_epochs=max_epochs,
             logger=wandb_logger,
             callbacks=[early_stopping, checkpoint_callback],
             accelerator='auto',

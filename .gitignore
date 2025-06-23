@@ -3,3 +3,4 @@ IMPORT_FIXES.md
 __pycache__/base_trainer.cpython-311.pyc
 __pycache__/contrastive_trainer.cpython-311.pyc
 BASE_TRAINER_FIX.md
+verify_train_fix.py

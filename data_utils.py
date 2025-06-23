@@ -170,6 +170,7 @@ def clean_text(text: str) -> str:
 
 def load_vigec_dataset(
     dataset_name: str = "phuhuy-se1/viGEC",
+    data_dir: Optional[str] = None,
     cache_dir: Optional[str] = None,
     train_subset_ratio: float = 1.0,
     validation_subset_ratio: float = 1.0,
@@ -179,7 +180,9 @@ def load_vigec_dataset(
     
     Args:
         dataset_name: HuggingFace dataset identifier
-        cache_dir: Directory to cache the dataset
+        data_dir: Directory containing processed data files (train.json, validation.json, test.json).
+                 If provided and files exist, loads from local files instead of HuggingFace
+        cache_dir: Directory to cache the dataset when downloading from HuggingFace
         train_subset_ratio: Ratio of training data to use (0.0-1.0, default 1.0)
         validation_subset_ratio: Ratio of validation data to use (0.0-1.0, default 1.0) 
         test_subset_ratio: Ratio of test data to use (0.0-1.0, default 0.05)
@@ -187,6 +190,40 @@ def load_vigec_dataset(
     Returns:
         Dictionary with 'train', 'validation', 'test' splits
     """
+    
+    # Check if local processed data exists
+    if data_dir and os.path.exists(data_dir):
+        local_files_exist = all(
+            os.path.exists(os.path.join(data_dir, f"{split}.json"))
+            for split in ['train', 'validation', 'test']
+        )
+        
+        if local_files_exist:
+            console.print(f"[bold green]Loading processed data from {data_dir}[/bold green]")
+            data = load_processed_data(data_dir)
+            
+            # Apply subset ratios if specified
+            subset_ratios = {
+                'train': train_subset_ratio,
+                'validation': validation_subset_ratio,
+                'test': test_subset_ratio
+            }
+            
+            for split in data:
+                if split in subset_ratios and subset_ratios[split] < 1.0:
+                    import random
+                    random.seed(42)  # For reproducibility
+                    subset_size = int(len(data[split]) * subset_ratios[split])
+                    data[split] = random.sample(data[split], subset_size)
+                    console.print(f"[blue]Using {subset_size} samples ({subset_ratios[split]*100:.1f}%) from {split} set[/blue]")
+                
+                console.print(f"[green]{split}: {len(data[split])} samples[/green]")
+            
+            return data
+        else:
+            console.print(f"[yellow]Local data directory {data_dir} exists but missing some files. Downloading from HuggingFace...[/yellow]")
+    
+    # Download and process from HuggingFace
     
     console.print(f"[bold blue]Loading dataset: {dataset_name}[/bold blue]")
     

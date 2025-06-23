@@ -472,19 +472,13 @@ class BaseTrainer:
     def train(self, max_epochs: int = 10, batch_size: int = 16):
         """Main training method with optional hyperparameter optimization"""
         console.print(f"[bold blue]Starting training for {self.model_name}[/bold blue]")
-        
-        # Load data with proper data directory
+          # Load data with proper data directory
         console.print("[yellow]Loading data...[/yellow]")
         try:
-            # Pass data_dir if the function supports it
-            import inspect
-            load_func_signature = inspect.signature(load_vigec_dataset)
-            if 'data_dir' in load_func_signature.parameters:
-                data = load_vigec_dataset(data_dir=self.data_dir)
-            else:
-                data = load_vigec_dataset()
+            # Use data_dir if provided, otherwise load from HuggingFace
+            data = load_vigec_dataset(data_dir=self.data_dir)
         except Exception as e:
-            console.print(f"[yellow]Warning: Could not use data_dir parameter: {e}[/yellow]")
+            console.print(f"[yellow]Warning: Could not load data with data_dir, falling back to HuggingFace: {e}[/yellow]")
             data = load_vigec_dataset()
         
         # Get tokenizer for data loading
@@ -552,14 +546,9 @@ class BaseTrainer:
         
         # Load data with proper data directory
         try:
-            import inspect
-            load_func_signature = inspect.signature(load_vigec_dataset)
-            if 'data_dir' in load_func_signature.parameters:
-                data = load_vigec_dataset(data_dir=self.data_dir)
-            else:
-                data = load_vigec_dataset()
+            data = load_vigec_dataset(data_dir=self.data_dir)
         except Exception as e:
-            console.print(f"[yellow]Warning: Could not use data_dir parameter: {e}[/yellow]")
+            console.print(f"[yellow]Warning: Could not load data with data_dir, falling back to HuggingFace: {e}[/yellow]")
             data = load_vigec_dataset()
         
         # Get tokenizer for data loading
@@ -604,17 +593,11 @@ class BaseTrainer:
     def optimize_hyperparameters(self, n_trials: int = 30, batch_size: int = 16):
         """Run only hyperparameter optimization"""
         console.print(f"[bold blue]Running hyperparameter optimization for {self.model_name}[/bold blue]")
-        
-        # Load data with proper data directory
+          # Load data with proper data directory
         try:
-            import inspect
-            load_func_signature = inspect.signature(load_vigec_dataset)
-            if 'data_dir' in load_func_signature.parameters:
-                data = load_vigec_dataset(data_dir=self.data_dir)
-            else:
-                data = load_vigec_dataset()
+            data = load_vigec_dataset(data_dir=self.data_dir)
         except Exception as e:
-            console.print(f"[yellow]Warning: Could not use data_dir parameter: {e}[/yellow]")
+            console.print(f"[yellow]Warning: Could not load data with data_dir, falling back to HuggingFace: {e}[/yellow]")
             data = load_vigec_dataset()
         
         # Get tokenizer for data loading

@@ -301,7 +301,7 @@ class HyperparameterOptimizer:
             return 0.0
           # Calculate steps based on actual data loader length
         train_steps_per_epoch = len(trial_data_loaders['train'])
-        max_epochs = 5  # Coarse search with fewer epochs
+        max_epochs = 3  # Coarse search with fewer epochs
         max_steps = train_steps_per_epoch * max_epochs
         warmup_steps = int(max_steps * warmup_ratio)
         

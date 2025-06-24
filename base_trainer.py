@@ -223,24 +223,44 @@ class HyperparameterOptimizer:
         data_loaders: Dict[str, DataLoader],
         n_trials: int = 30,
         direction: str = "maximize",
-        use_wandb: bool = True
+        use_wandb: bool = True,
+        dataset_name: str = "phuhuy-se1/viGEC",
+        train_subset_ratio: float = 1.0,
+        validation_subset_ratio: float = 1.0,
+        test_subset_ratio: float = 0.05,
+        search_space: Optional[Dict[str, Any]] = None
     ):
         self.model_name = model_name
         self.data_loaders = data_loaders
         self.n_trials = n_trials
         self.direction = direction
         self.use_wandb = use_wandb
+        self.dataset_name = dataset_name
+        self.train_subset_ratio = train_subset_ratio
+        self.validation_subset_ratio = validation_subset_ratio
+        self.test_subset_ratio = test_subset_ratio
+        self.search_space = search_space or {}
         
     def objective(self, trial: optuna.Trial) -> float:
         """Objective function for Optuna optimization"""
         
         console.print(f"\n[bold cyan]🔍 Starting Trial {trial.number}[/bold cyan]")
-          # Suggest hyperparameters
-        lr = trial.suggest_float('learning_rate', 1e-6, 1e-3, log=True)
-        weight_decay = trial.suggest_float('weight_decay', 0.001, 0.1, log=True)
-        label_smoothing = trial.suggest_float('label_smoothing', 0.0, 0.3)
-        batch_size = trial.suggest_categorical('batch_size', [16, 48, 96])
-        warmup_ratio = trial.suggest_float('warmup_ratio', 0.05, 0.2)
+        
+        # Get search space parameters or use defaults
+        search_space = self.search_space
+        
+        # Suggest hyperparameters with customizable search space
+        lr_range = search_space.get('learning_rate', {'low': 1e-6, 'high': 1e-3, 'log': True})
+        wd_range = search_space.get('weight_decay', {'low': 0.001, 'high': 0.1, 'log': True})
+        ls_range = search_space.get('label_smoothing', {'low': 0.0, 'high': 0.3})
+        bs_choices = search_space.get('batch_size', [16, 48, 96])
+        wr_range = search_space.get('warmup_ratio', {'low': 0.05, 'high': 0.2})
+        
+        lr = trial.suggest_float('learning_rate', **lr_range)
+        weight_decay = trial.suggest_float('weight_decay', **wd_range)
+        label_smoothing = trial.suggest_float('label_smoothing', **ls_range)
+        batch_size = trial.suggest_categorical('batch_size', bs_choices)
+        warmup_ratio = trial.suggest_float('warmup_ratio', **wr_range)
         
         # Apply batch size dependent learning rate scaling (optional)
         # lr_scaled = lr * (batch_size / 16)  # Scale relative to base batch_size=16
@@ -260,9 +280,14 @@ class HyperparameterOptimizer:
             # Need to get tokenizer to recreate data loaders
             _, tokenizer = get_model_and_tokenizer(self.model_name)
             
-            # Load data fresh for this trial
+            # Load data fresh for this trial with dataset parameters
             from data_utils import load_vigec_dataset
-            data = load_vigec_dataset()
+            data = load_vigec_dataset(
+                dataset_name=self.dataset_name,
+                train_subset_ratio=self.train_subset_ratio,
+                validation_subset_ratio=self.validation_subset_ratio,
+                test_subset_ratio=self.test_subset_ratio
+            )
             
             # Create data loaders with trial-specific batch size
             trial_data_loaders = create_data_loaders(
@@ -426,23 +451,35 @@ class BaseTrainer:
         data_dir: str = "./data/processed",
         output_dir: str = "./models/base",
         hyperopt: bool = True,
-        use_wandb: bool = True
+        use_wandb: bool = True,
+        dataset_name: str = "phuhuy-se1/viGEC",
+        train_subset_ratio: float = 1.0,
+        validation_subset_ratio: float = 1.0,
+        test_subset_ratio: float = 0.05
     ):
         self.model_name = model_name
         self.data_dir = data_dir
         self.output_dir = output_dir
         self.hyperopt = hyperopt
         self.use_wandb = use_wandb
-        
+        self.dataset_name = dataset_name
+        self.train_subset_ratio = train_subset_ratio
+        self.validation_subset_ratio = validation_subset_ratio
+        self.test_subset_ratio = test_subset_ratio        
         os.makedirs(output_dir, exist_ok=True)
         
-    def _run_hyperopt(self, data_loaders, n_trials=10, study_name="vigec_hyperopt"):
+    def _run_hyperopt(self, data_loaders, n_trials=10, study_name="vigec_hyperopt", search_space=None):
         """Internal method to run hyperparameter optimization"""
         optimizer = HyperparameterOptimizer(
             model_name=self.model_name,
             data_loaders=data_loaders,
             n_trials=n_trials,
-            use_wandb=self.use_wandb
+            use_wandb=self.use_wandb,
+            dataset_name=self.dataset_name,
+            train_subset_ratio=self.train_subset_ratio,
+            validation_subset_ratio=self.validation_subset_ratio,
+            test_subset_ratio=self.test_subset_ratio,
+            search_space=search_space
         )
         
         study = optimizer.optimize(study_name=study_name)
@@ -504,17 +541,27 @@ class BaseTrainer:
             
         return model
     
-    def train(self, max_epochs: int = 10, batch_size: int = 16):
+    def train(self, max_epochs: int = 10, batch_size: int = 16, search_space: Optional[Dict[str, Any]] = None):
         """Main training method with optional hyperparameter optimization"""
-        console.print(f"[bold blue]Starting training for {self.model_name}[/bold blue]")
-          # Load data with proper data directory
+        console.print(f"[bold blue]Starting training for {self.model_name}[/bold blue]")        # Load data with proper data directory
         console.print("[yellow]Loading data...[/yellow]")
         try:
-            # Use data_dir if provided, otherwise load from HuggingFace
-            data = load_vigec_dataset(data_dir=self.data_dir)
+            # Use data_dir if provided, otherwise load from HuggingFace with dataset parameters
+            data = load_vigec_dataset(
+                dataset_name=self.dataset_name,
+                data_dir=self.data_dir,
+                train_subset_ratio=self.train_subset_ratio,
+                validation_subset_ratio=self.validation_subset_ratio,
+                test_subset_ratio=self.test_subset_ratio
+            )
         except Exception as e:
             console.print(f"[yellow]Warning: Could not load data with data_dir, falling back to HuggingFace: {e}[/yellow]")
-            data = load_vigec_dataset()
+            data = load_vigec_dataset(
+                dataset_name=self.dataset_name,
+                train_subset_ratio=self.train_subset_ratio,
+                validation_subset_ratio=self.validation_subset_ratio,
+                test_subset_ratio=self.test_subset_ratio
+            )
         
         # Get tokenizer for data loading
         _, tokenizer = get_model_and_tokenizer(self.model_name)
@@ -531,7 +578,7 @@ class BaseTrainer:
         # Step 1: Hyperparameter optimization (if enabled)
         if self.hyperopt:
             console.print("[yellow]Running hyperparameter optimization...[/yellow]")
-            study = self._run_hyperopt(data_loaders, n_trials=10)
+            study = self._run_hyperopt(data_loaders, n_trials=10, search_space=search_space)
             best_params = study.best_params
             console.print(f"[green]Hyperparameter optimization complete. Best F0.5: {study.best_value:.4f}[/green]")
         
@@ -564,8 +611,7 @@ class BaseTrainer:
                 'weight_decay': 0.01,
                 'label_smoothing': 0.1,
                 'max_steps': len(data_loaders['train']) * max_epochs,
-                'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)
-            }
+                'warmup_steps': int(len(data_loaders['train']) * max_epochs * 0.1)            }
         
         final_model = self._train_model(
             data_loaders, model_config, max_epochs, 
@@ -581,10 +627,21 @@ class BaseTrainer:
         
         # Load data with proper data directory
         try:
-            data = load_vigec_dataset(data_dir=self.data_dir)
+            data = load_vigec_dataset(
+                dataset_name=self.dataset_name,
+                data_dir=self.data_dir,
+                train_subset_ratio=self.train_subset_ratio,
+                validation_subset_ratio=self.validation_subset_ratio,
+                test_subset_ratio=self.test_subset_ratio
+            )
         except Exception as e:
             console.print(f"[yellow]Warning: Could not load data with data_dir, falling back to HuggingFace: {e}[/yellow]")
-            data = load_vigec_dataset()
+            data = load_vigec_dataset(
+                dataset_name=self.dataset_name,
+                train_subset_ratio=self.train_subset_ratio,
+                validation_subset_ratio=self.validation_subset_ratio,
+                test_subset_ratio=self.test_subset_ratio
+            )
         
         # Get tokenizer for data loading
         _, tokenizer = get_model_and_tokenizer(self.model_name)
@@ -617,6 +674,7 @@ class BaseTrainer:
             'max_steps': len(data_loaders['train']) * max_epochs,
             'warmup_steps': warmup_steps
         }
+        
         model = self._train_model(
             data_loaders, model_config, max_epochs,
             run_name="custom_params_model"
@@ -625,15 +683,27 @@ class BaseTrainer:
         console.print(f"[green]Training complete! Model saved to {self.output_dir}[/green]")
         return model
     
-    def optimize_hyperparameters(self, n_trials: int = 30, batch_size: int = 16):
+    def optimize_hyperparameters(self, n_trials: int = 30, batch_size: int = 16, search_space: Optional[Dict[str, Any]] = None):
         """Run only hyperparameter optimization"""
         console.print(f"[bold blue]Running hyperparameter optimization for {self.model_name}[/bold blue]")
-          # Load data with proper data directory
+        
+        # Load data with proper data directory
         try:
-            data = load_vigec_dataset(data_dir=self.data_dir)
+            data = load_vigec_dataset(
+                dataset_name=self.dataset_name,
+                data_dir=self.data_dir,
+                train_subset_ratio=self.train_subset_ratio,
+                validation_subset_ratio=self.validation_subset_ratio,
+                test_subset_ratio=self.test_subset_ratio
+            )
         except Exception as e:
             console.print(f"[yellow]Warning: Could not load data with data_dir, falling back to HuggingFace: {e}[/yellow]")
-            data = load_vigec_dataset()
+            data = load_vigec_dataset(
+                dataset_name=self.dataset_name,
+                train_subset_ratio=self.train_subset_ratio,
+                validation_subset_ratio=self.validation_subset_ratio,
+                test_subset_ratio=self.test_subset_ratio
+            )
         
         # Get tokenizer for data loading
         _, tokenizer = get_model_and_tokenizer(self.model_name)
@@ -641,13 +711,13 @@ class BaseTrainer:
         # Create data loaders
         data_loaders = create_data_loaders(
             data=data,
-            tokenizer=tokenizer,
-            batch_size=batch_size
+            tokenizer=tokenizer,            batch_size=batch_size
         )
         
         study = self._run_hyperopt(
             data_loaders, n_trials=n_trials, 
-            study_name="vigec_standalone_hyperopt"
+            study_name="vigec_standalone_hyperopt",
+            search_space=search_space
         )
         
         console.print(f"[green]Hyperparameter optimization complete![/green]")

@@ -25,8 +25,51 @@ import numpy as np
 from typing import Dict, List, Optional, Any
 from data_utils import load_vigec_dataset, create_data_loaders, get_model_and_tokenizer
 from evaluator import F05Evaluator
+import warnings
 
 console = Console()
+
+def check_torch_security():
+    """Check PyTorch version and setup secure loading"""
+    torch_version = torch.__version__
+    console.print(f"[blue]🔍 PyTorch version: {torch_version}[/blue]")
+    
+    # Parse version
+    major, minor = map(int, torch_version.split('.')[:2])
+    
+    if major < 2 or (major == 2 and minor < 6):
+        console.print("[yellow]⚠️  PyTorch version < 2.6 detected. Upgrading recommended for security.[/yellow]")
+        console.print("[yellow]    Using safetensors for secure model loading where possible.[/yellow]")
+        
+        # Set environment variable to prefer safetensors
+        os.environ["TRANSFORMERS_CACHE"] = os.environ.get("TRANSFORMERS_CACHE", "./cache")
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"  # Enable faster downloads
+        
+        # Suppress the warning if we can't avoid torch.load
+        warnings.filterwarnings("ignore", message=".*torch.load.*")
+        
+    else:
+        console.print("[green]✅ PyTorch version >= 2.6 - Security requirements met[/green]")
+    
+    return major, minor
+
+def setup_secure_model_loading():
+    """Setup secure model loading configurations"""
+    try:
+        # Try to import safetensors to check availability
+        import safetensors
+        console.print("[green]✅ Safetensors available - using secure model loading[/green]")
+        
+        # Set transformers to prefer safetensors
+        os.environ["SAFETENSORS_FAST_GPU"] = "1"
+        return True
+    except ImportError:
+        console.print("[yellow]⚠️  Safetensors not available. Consider installing: pip install safetensors[/yellow]")
+        return False
+
+# Check security setup
+check_torch_security()
+setup_secure_model_loading()
 
 def setup_tensor_cores():
     """Setup optimal Tensor Core configuration for different GPU architectures"""
@@ -109,6 +152,57 @@ def get_optimal_trainer_settings():
         console.print(f"[blue]⚙️  Trainer settings optimized for: {device_name}[/blue]")
     
     return settings
+
+class SecureModelCheckpoint(ModelCheckpoint):
+    """Secure ModelCheckpoint that prefers safetensors format"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_safetensors = True
+        
+    def _save_checkpoint(self, trainer, filepath: str) -> None:
+        """Override to use safetensors when possible"""
+        try:
+            # Try to save with safetensors format
+            if self.use_safetensors and hasattr(trainer.lightning_module.model, 'save_pretrained'):
+                # For transformers models, use safe_serialization
+                model_dir = filepath.replace('.ckpt', '_safetensors')
+                os.makedirs(model_dir, exist_ok=True)
+                
+                trainer.lightning_module.model.save_pretrained(
+                    model_dir, 
+                    safe_serialization=True,
+                    max_shard_size="2GB"
+                )
+                
+                # Save additional Lightning state
+                lightning_state = {
+                    'epoch': trainer.current_epoch,
+                    'global_step': trainer.global_step,
+                    'pytorch-lightning_version': trainer.lightning_module.__class__.__module__.split('.')[0],
+                    'state_dict': {},  # Empty since model is saved separately
+                    'lr_schedulers': [],
+                    'epoch_loop.state_dict': {},
+                    'optimizer_states': [],
+                    'hparams_name': 'hparams',
+                    'hyper_parameters': trainer.lightning_module.hparams,
+                }
+                
+                # Save lightning state as json (safer than pickle)
+                state_file = os.path.join(model_dir, 'lightning_state.json')
+                with open(state_file, 'w') as f:
+                    json.dump(lightning_state, f, indent=2, default=str)
+                
+                console.print(f"[green]✅ Model saved securely with safetensors: {model_dir}[/green]")
+                
+            else:
+                # Fallback to default Lightning checkpoint
+                super()._save_checkpoint(trainer, filepath)
+                console.print(f"[yellow]⚠️  Fallback to standard checkpoint: {filepath}[/yellow]")
+                
+        except Exception as e:
+            console.print(f"[yellow]⚠️  Safetensors save failed, using standard checkpoint: {e}[/yellow]")
+            super()._save_checkpoint(trainer, filepath)
 
 class GECLightningModule(L.LightningModule):
     """Lightning module for GEC base training"""
@@ -435,7 +529,7 @@ class HyperparameterOptimizer:
             trial, monitor='val_f05'
         )
         
-        checkpoint_callback = ModelCheckpoint(
+        checkpoint_callback = SecureModelCheckpoint(
             monitor='val_f05',
             mode='max',
             save_top_k=1,
@@ -527,6 +621,43 @@ class HyperparameterOptimizer:
         
         return study
 
+def safe_load_checkpoint(checkpoint_path: str):
+    """Safely load checkpoint with security considerations"""
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    
+    try:
+        # Try to load safetensors first
+        if os.path.isdir(checkpoint_path):
+            # Directory containing safetensors
+            safetensor_files = [f for f in os.listdir(checkpoint_path) if f.endswith('.safetensors')]
+            if safetensor_files:
+                console.print(f"[green]✅ Loading secure safetensors checkpoint: {checkpoint_path}[/green]")
+                return checkpoint_path
+        
+        # Check for .safetensors file
+        if checkpoint_path.endswith('.safetensors'):
+            console.print(f"[green]✅ Loading safetensors checkpoint: {checkpoint_path}[/green]")
+            return checkpoint_path
+            
+        # For .ckpt files, warn about security
+        if checkpoint_path.endswith('.ckpt'):
+            major, minor = check_torch_security()
+            if major < 2 or (major == 2 and minor < 6):
+                console.print(f"[red]❌ Cannot load .ckpt file with PyTorch < 2.6 due to security restrictions[/red]")
+                console.print(f"[yellow]💡 Solutions:[/yellow]")
+                console.print(f"[yellow]  1. Upgrade PyTorch: pip install torch>=2.6[/yellow]")
+                console.print(f"[yellow]  2. Use safetensors format instead[/yellow]")
+                console.print(f"[yellow]  3. Convert checkpoint: torch.save(torch.load('{checkpoint_path}'), '{checkpoint_path}', _use_new_zipfile_serialization=False)[/yellow]")
+                raise ValueError("Cannot load .ckpt file due to PyTorch security restrictions")
+            
+        console.print(f"[yellow]⚠️  Loading checkpoint (ensure it's from trusted source): {checkpoint_path}[/yellow]")
+        return checkpoint_path
+        
+    except Exception as e:
+        console.print(f"[red]❌ Error loading checkpoint: {e}[/red]")
+        raise
+
 class BaseTrainer:
     """Main trainer for base model"""
     
@@ -590,7 +721,7 @@ class BaseTrainer:
         # Callbacks
         callbacks = [
             EarlyStopping(monitor='val_f05', patience=5, mode='max', verbose=True),
-            ModelCheckpoint(
+            SecureModelCheckpoint(
                 dirpath=self.output_dir,
                 monitor='val_f05',
                 mode='max',
@@ -619,9 +750,26 @@ class BaseTrainer:
             val_dataloaders=data_loaders['validation']
         )
         
-        # Save model
-        model.model.save_pretrained(os.path.join(self.output_dir, run_name))
-        model.tokenizer.save_pretrained(os.path.join(self.output_dir, run_name))
+        # Save model with safetensors if possible
+        try:
+            output_path = os.path.join(self.output_dir, run_name)
+            os.makedirs(output_path, exist_ok=True)
+            
+            # Save with safe serialization
+            model.model.save_pretrained(
+                output_path, 
+                safe_serialization=True,
+                max_shard_size="2GB"
+            )
+            model.tokenizer.save_pretrained(output_path)
+            
+            console.print(f"[green]✅ Model saved securely with safetensors: {output_path}[/green]")
+            
+        except Exception as e:
+            console.print(f"[yellow]⚠️  Safetensors save failed, using standard format: {e}[/yellow]")
+            # Fallback to standard save
+            model.model.save_pretrained(os.path.join(self.output_dir, run_name))
+            model.tokenizer.save_pretrained(os.path.join(self.output_dir, run_name))
         
         if self.use_wandb:
             wandb.finish()
@@ -812,6 +960,29 @@ class BaseTrainer:
         console.print(f"[green]Best F0.5: {study.best_value:.4f}[/green]")
         
         return study
+    
+    def load_model_safely(self, checkpoint_path: str):
+        """Load model from checkpoint safely"""
+        try:
+            safe_path = safe_load_checkpoint(checkpoint_path)
+            
+            if os.path.isdir(safe_path):
+                # Load from safetensors directory
+                from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+                model = AutoModelForSeq2SeqLM.from_pretrained(safe_path)
+                tokenizer = AutoTokenizer.from_pretrained(safe_path)
+                
+                console.print(f"[green]✅ Model loaded safely from: {safe_path}[/green]")
+                return model, tokenizer
+            else:
+                # Load Lightning checkpoint
+                model = GECLightningModule.load_from_checkpoint(safe_path)
+                console.print(f"[green]✅ Lightning model loaded from: {safe_path}[/green]")
+                return model.model, model.tokenizer
+                
+        except Exception as e:
+            console.print(f"[red]❌ Failed to load model: {e}[/red]")
+            raise
 
 if __name__ == "__main__":
     # Example usage

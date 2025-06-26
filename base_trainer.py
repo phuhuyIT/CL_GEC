@@ -13,12 +13,39 @@ from transformers import (
     AutoTokenizer, 
     get_linear_schedule_with_warmup
 )
-import lightning as L
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
-from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
-import optuna
-from optuna.integration import PyTorchLightningPruningCallback
-import wandb
+
+# Handle PyTorch Lightning import with compatibility
+try:
+    import lightning as L
+    from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+    from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
+except ImportError as e:
+    print(f"Warning: Lightning import issue: {e}")
+    try:
+        # Try older pytorch-lightning import
+        import pytorch_lightning as L
+        from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+        from pytorch_lightning.loggers import WandbLogger, TensorBoardLogger
+        print("Using pytorch_lightning (legacy)")
+    except ImportError:
+        raise ImportError("Cannot import PyTorch Lightning. Please install: pip install lightning>=2.0")
+
+# Handle Optuna import
+try:
+    import optuna
+    from optuna.integration import PyTorchLightningPruningCallback
+except ImportError:
+    print("Warning: Optuna not available. Hyperparameter optimization disabled.")
+    optuna = None
+    PyTorchLightningPruningCallback = None
+
+# Handle Wandb import
+try:
+    import wandb
+except ImportError:
+    print("Warning: Wandb not available. Logging disabled.")
+    wandb = None
+
 from rich.console import Console
 from rich.progress import track
 import numpy as np
@@ -420,6 +447,9 @@ class HyperparameterOptimizer:
     def objective(self, trial: optuna.Trial) -> float:
         """Objective function for Optuna optimization"""
         
+        if optuna is None:
+            raise ImportError("Optuna is required for hyperparameter optimization. Install with: pip install optuna")
+        
         console.print(f"\n[bold cyan]🔍 Starting Trial {trial.number}[/bold cyan]")
         
         # Get search space parameters or use defaults
@@ -500,7 +530,7 @@ class HyperparameterOptimizer:
         console.print(f"[green]✅ Model created successfully[/green]")
         
         # Logger
-        if self.use_wandb:
+        if self.use_wandb and wandb is not None:
             wandb_logger = WandbLogger(
                 project="vigec-hyperopt",
                 name=f"trial_{trial.number}",
@@ -525,16 +555,21 @@ class HyperparameterOptimizer:
             verbose=True
         )
         
-        pruning_callback = PyTorchLightningPruningCallback(
-            trial, monitor='val_f05'
-        )
-        
         checkpoint_callback = SecureModelCheckpoint(
             monitor='val_f05',
             mode='max',
             save_top_k=1,
             filename=f'trial_{trial.number}_best'
         )
+        
+        if PyTorchLightningPruningCallback is not None:
+            pruning_callback = PyTorchLightningPruningCallback(
+                trial, monitor='val_f05'
+            )
+            callbacks_list = [early_stopping, pruning_callback, checkpoint_callback]
+        else:
+            console.print("[yellow]⚠️  Optuna pruning not available, skipping pruning callback[/yellow]")
+            callbacks_list = [early_stopping, checkpoint_callback]
           # Trainer with progress bars enabled for better visibility
         precision = get_optimal_precision()
         trainer_settings = get_optimal_trainer_settings()
@@ -542,7 +577,7 @@ class HyperparameterOptimizer:
         trainer = L.Trainer(
             max_epochs=max_epochs,
             logger=wandb_logger,
-            callbacks=[early_stopping, pruning_callback, checkpoint_callback],
+            callbacks=callbacks_list,
             enable_progress_bar=True,   # Enable progress bars for hyperopt visibility
             enable_model_summary=False, # Keep model summary disabled to reduce clutter
             accelerator='auto',
@@ -565,19 +600,22 @@ class HyperparameterOptimizer:
             console.print(f"[bold green]✅ Trial {trial.number} completed! Best F0.5: {best_f05:.4f}[/bold green]")
             
             # Clean up
-            if self.use_wandb:
+            if self.use_wandb and wandb is not None:
                 wandb.finish()
             
             return best_f05
             
         except Exception as e:
             console.print(f"[red]❌ Trial {trial.number} failed: {e}[/red]")
-            if self.use_wandb:
+            if self.use_wandb and wandb is not None:
                 wandb.finish()
             return 0.0
     
-    def optimize(self, study_name: str = "vigec_hyperopt") -> optuna.Study:
+    def optimize(self, study_name: str = "vigec_hyperopt"):
         """Run hyperparameter optimization"""
+        
+        if optuna is None:
+            raise ImportError("Optuna is required for hyperparameter optimization. Install with: pip install optuna")
         
         console.print(f"[bold blue]Starting hyperparameter optimization with {self.n_trials} trials[/bold blue]")
         
@@ -712,7 +750,7 @@ class BaseTrainer:
         """Internal method to train model with given config"""
         # Create model
         model = GECLightningModule(**model_config)        # Logger
-        if self.use_wandb:
+        if self.use_wandb and wandb is not None:
             wandb_logger = WandbLogger(project="vigec-base-training", name=run_name)
         else:
             # Use TensorBoard logger when wandb is disabled
@@ -771,7 +809,7 @@ class BaseTrainer:
             model.model.save_pretrained(os.path.join(self.output_dir, run_name))
             model.tokenizer.save_pretrained(os.path.join(self.output_dir, run_name))
         
-        if self.use_wandb:
+        if self.use_wandb and wandb is not None:
             wandb.finish()
             
         return model
@@ -812,10 +850,14 @@ class BaseTrainer:
         
         # Step 1: Hyperparameter optimization (if enabled)
         if self.hyperopt:
-            console.print("[yellow]Running hyperparameter optimization...[/yellow]")
-            study = self._run_hyperopt(data_loaders, n_trials=10, search_space=search_space)
-            best_params = study.best_params
-            console.print(f"[green]Hyperparameter optimization complete. Best F0.5: {study.best_value:.4f}[/green]")
+            if optuna is None:
+                console.print("[yellow]⚠️  Optuna not available. Skipping hyperparameter optimization.[/yellow]")
+                console.print("[yellow]    Install with: pip install optuna[/yellow]")
+            else:
+                console.print("[yellow]Running hyperparameter optimization...[/yellow]")
+                study = self._run_hyperopt(data_loaders, n_trials=10, search_space=search_space)
+                best_params = study.best_params
+                console.print(f"[green]Hyperparameter optimization complete. Best F0.5: {study.best_value:.4f}[/green]")
         
         # Step 2: Final training with best parameters
         console.print("[yellow]Training final model...[/yellow]")
@@ -920,6 +962,12 @@ class BaseTrainer:
     
     def optimize_hyperparameters(self, n_trials: int = 30, batch_size: int = 16, search_space: Optional[Dict[str, Any]] = None):
         """Run only hyperparameter optimization"""
+        
+        if optuna is None:
+            console.print("[red]❌ Optuna is required for hyperparameter optimization[/red]")
+            console.print("[yellow]Install with: pip install optuna[/yellow]")
+            return None
+        
         console.print(f"[bold blue]Running hyperparameter optimization for {self.model_name}[/bold blue]")
         
         # Load data with proper data directory

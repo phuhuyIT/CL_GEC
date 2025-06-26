@@ -24,9 +24,13 @@ def main():
     console.print("[bold blue]🔐 Installing security dependencies for safe model loading[/bold blue]")
     
     packages = [
-        "safetensors",
         "torch>=2.6.0",  # Latest secure version
-        "transformers[safetensors]",
+        "safetensors>=0.4.0",
+        "transformers>=4.36.0",
+        "lightning>=2.0.0",  # Modern Lightning
+        "optuna>=3.0.0",  # For hyperparameter optimization
+        "wandb",  # For logging
+        "rich",  # For console output
     ]
     
     success_count = 0
@@ -37,6 +41,27 @@ def main():
     if success_count == len(packages):
         console.print("\n[bold green]🎉 All security dependencies installed successfully![/bold green]")
         console.print("[green]Your model training is now secure and optimized for H100.[/green]")
+        
+        # Test imports
+        console.print("\n[blue]🧪 Testing imports...[/blue]")
+        try:
+            import torch
+            console.print(f"[green]✅ PyTorch {torch.__version__}[/green]")
+            
+            import safetensors
+            console.print("[green]✅ Safetensors available[/green]")
+            
+            import lightning
+            console.print(f"[green]✅ Lightning available[/green]")
+            
+            import transformers
+            console.print(f"[green]✅ Transformers {transformers.__version__}[/green]")
+            
+            console.print("\n[bold green]🚀 All imports successful! Ready to train.[/bold green]")
+            
+        except ImportError as e:
+            console.print(f"[yellow]⚠️  Import test failed: {e}[/yellow]")
+            
     else:
         console.print(f"\n[yellow]⚠️  {success_count}/{len(packages)} packages installed successfully[/yellow]")
         console.print("[yellow]Some installations failed. Please check the errors above.[/yellow]")

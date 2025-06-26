@@ -12,3 +12,38 @@ LOGGER_ATTRIBUTEERROR_FIX.md
 DATA_DIR_PARAMETER_FIX.md
 HYPEROPT_PROGRESS_LOGGING_FIX.md
 H100_SECURITY_FIX.md
+install_security_deps.py
+debug_dependencies.py
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Logs and databases
+logs/
+*.log
+*.db
+*.sqlite
+
+# Model checkpoints and outputs
+models/
+checkpoints/
+outputs/
+wandb/
+
+# Environment and IDE
+.env
+.venv
+venv/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+CONFIG_IMPORT_FIX.md

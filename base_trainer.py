@@ -28,6 +28,88 @@ from evaluator import F05Evaluator
 
 console = Console()
 
+def setup_tensor_cores():
+    """Setup optimal Tensor Core configuration for different GPU architectures"""
+    if torch.cuda.is_available():
+        device_name = torch.cuda.get_device_name()
+        console.print(f"[blue]🖥️  Detected GPU: {device_name}[/blue]")
+        
+        # Modern GPUs with Tensor Cores (RTX 30/40/50 series, A100, H100, etc.)
+        tensor_core_gpus = [
+            'RTX 50', 'RTX 40', 'RTX 30', 'RTX 20',  # Consumer RTX series
+            'A100', 'A40', 'A30', 'A10',             # Data center A series
+            'H100', 'H200',                          # Hopper architecture
+            'V100',                                  # Volta architecture
+            'T4'                                     # Tesla T4
+        ]
+        
+        has_tensor_cores = any(gpu in device_name for gpu in tensor_core_gpus)
+        
+        if has_tensor_cores:
+            # Use 'high' for newer architectures (RTX 40/50, H100) for best performance
+            # Use 'medium' for older ones for balanced performance/precision
+            if any(gpu in device_name for gpu in ['RTX 50', 'RTX 40', 'H100', 'H200']):
+                precision_mode = 'high'
+                console.print("[green]🚀 Setting Tensor Core precision to 'high' for optimal performance[/green]")
+            else:
+                precision_mode = 'medium'
+                console.print("[green]⚡ Setting Tensor Core precision to 'medium' for balanced performance[/green]")
+            
+            torch.set_float32_matmul_precision(precision_mode)
+            console.print(f"[green]✅ Tensor Cores enabled with '{precision_mode}' precision[/green]")
+        else:
+            console.print("[yellow]⚠️  Tensor Cores not detected or not supported on this GPU[/yellow]")
+    else:
+        console.print("[yellow]⚠️  CUDA not available, running on CPU[/yellow]")
+
+# Setup Tensor Cores at module import
+setup_tensor_cores()
+
+def get_optimal_precision():
+    """Get optimal precision setting based on available hardware"""
+    if not torch.cuda.is_available():
+        return "32-true"
+    
+    device_name = torch.cuda.get_device_name()
+    
+    # RTX 50/40 series and H100 can handle bf16 very well
+    if any(gpu in device_name for gpu in ['RTX 50', 'RTX 40', 'H100', 'H200']):
+        # Check if bfloat16 is supported
+        if torch.cuda.is_bf16_supported():
+            return "bf16-mixed"  # Best for newest GPUs
+        else:
+            return "16-mixed"
+    
+    # For other modern GPUs with Tensor Cores, use 16-mixed
+    tensor_core_gpus = ['RTX 30', 'RTX 20', 'A100', 'A40', 'A30', 'A10', 'V100', 'T4']
+    if any(gpu in device_name for gpu in tensor_core_gpus):
+        return "16-mixed"
+    
+    # For older GPUs without Tensor Cores
+    return "32-true"
+
+def get_optimal_trainer_settings():
+    """Get optimal trainer settings based on available hardware"""
+    settings = {
+        'gradient_clip_val': 1.0,
+        'accumulate_grad_batches': 1,
+        'enable_checkpointing': True
+    }
+    
+    if torch.cuda.is_available():
+        device_name = torch.cuda.get_device_name()
+        
+        # RTX 5090 and other high-end GPUs can handle larger gradient accumulation
+        if any(gpu in device_name for gpu in ['RTX 50', 'RTX 40', 'A100', 'H100']):
+            # These GPUs have more memory, can use gradient checkpointing for larger models
+            settings['enable_checkpointing'] = True
+            # You can increase accumulate_grad_batches if memory allows
+            # settings['accumulate_grad_batches'] = 2  # Uncomment if you want larger effective batch size
+        
+        console.print(f"[blue]⚙️  Trainer settings optimized for: {device_name}[/blue]")
+    
+    return settings
+
 class GECLightningModule(L.LightningModule):
     """Lightning module for GEC base training"""
     
@@ -360,7 +442,9 @@ class HyperparameterOptimizer:
             filename=f'trial_{trial.number}_best'
         )
           # Trainer with progress bars enabled for better visibility
-        precision = "16-mixed" if torch.cuda.is_available() else "32-true"
+        precision = get_optimal_precision()
+        trainer_settings = get_optimal_trainer_settings()
+        console.print(f"[blue]🎯 Using precision: {precision}[/blue]")
         trainer = L.Trainer(
             max_epochs=max_epochs,
             logger=wandb_logger,
@@ -368,7 +452,8 @@ class HyperparameterOptimizer:
             enable_progress_bar=True,   # Enable progress bars for hyperopt visibility
             enable_model_summary=False, # Keep model summary disabled to reduce clutter
             accelerator='auto',
-            precision=precision
+            precision=precision,
+            **trainer_settings
         )
         
         try:
@@ -515,14 +600,16 @@ class BaseTrainer:
         ]
         
         # Trainer
-        precision = "16-mixed" if torch.cuda.is_available() else "32-true"
+        precision = get_optimal_precision()
+        trainer_settings = get_optimal_trainer_settings()
+        console.print(f"[blue]🎯 Using precision: {precision}[/blue]")
         trainer = L.Trainer(
             max_epochs=max_epochs,
             logger=wandb_logger,
             callbacks=callbacks,
             accelerator='auto',
             precision=precision,
-            gradient_clip_val=1.0
+            **trainer_settings
         )
         
         # Train

@@ -36,7 +36,7 @@ def setup_tensor_cores():
         
         # Modern GPUs with Tensor Cores (RTX 30/40/50 series, A100, H100, etc.)
         tensor_core_gpus = [
-            'RTX 50', 'RTX 40', 'RTX 30', 'RTX 20',  # Consumer RTX series
+            'RTX 50', 'RTX 40', 'RTX 30', 'RTX 20','RTX PRO 60',  # Consumer RTX series
             'A100', 'A40', 'A30', 'A10',             # Data center A series
             'H100', 'H200',                          # Hopper architecture
             'V100',                                  # Volta architecture
@@ -48,7 +48,7 @@ def setup_tensor_cores():
         if has_tensor_cores:
             # Use 'high' for newer architectures (RTX 40/50, H100) for best performance
             # Use 'medium' for older ones for balanced performance/precision
-            if any(gpu in device_name for gpu in ['RTX 50', 'RTX 40', 'H100', 'H200']):
+            if any(gpu in device_name for gpu in ['RTX 50', 'RTX 40', 'H100', 'H200', 'RTX PRO 60']):
                 precision_mode = 'high'
                 console.print("[green]🚀 Setting Tensor Core precision to 'high' for optimal performance[/green]")
             else:

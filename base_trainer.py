@@ -232,7 +232,7 @@ class SecureModelCheckpoint(ModelCheckpoint):
             super()._save_checkpoint(trainer, filepath)
 
 class GECLightningModule(L.LightningModule):
-    """Lightning module for GEC base training"""
+    """Lightning module for GEC with mT5 prefix support"""
     
     def __init__(
         self,
@@ -246,6 +246,20 @@ class GECLightningModule(L.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
+        
+        # Store model name for prefix detection
+        self.model_name = model_name
+        
+        # Check if mT5/T5 model
+        self.is_mt5 = any(mt5_variant in model_name.lower() for mt5_variant in [
+            'mt5', 't5', 'vit5'
+        ])
+        
+        if self.is_mt5:
+            self.prefix = "grammar: "
+            console.print(f"[blue]🏷️ mT5 model detected, using prefix: '{self.prefix}'[/blue]")
+        else:
+            self.prefix = ""
         
         # Load model and tokenizer
         self.model, self.tokenizer = get_model_and_tokenizer(model_name)

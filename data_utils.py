@@ -275,9 +275,48 @@ def create_data_loaders(
     tokenizer: AutoTokenizer,
     batch_size: int = 16,
     max_length: int = 384,
-    num_workers: int = 4
+    num_workers: int = 4,
+    model_name: Optional[str] = None
 ) -> Dict[str, DataLoader]:
     """Create data loaders for training"""
+    
+    # Check if we need prefixes
+    is_mt5 = model_name and any(mt5_variant in model_name.lower() for mt5_variant in [
+        'mt5', 't5', 'vit5'
+    ])
+    
+    if is_mt5:
+        # Use task-specific prefix for mT5/T5 models
+        prefix = "grammar: "  # or "correct grammar: " 
+        console.print(f"[blue]🏷️ Using mT5 prefix: '{prefix}'[/blue]")
+    else:
+        prefix = ""
+    
+    def tokenize_function(examples):
+        # Add prefix for mT5 models
+        sources = [prefix + src for src in examples['source']] if prefix else examples['source']
+        
+        # Tokenize inputs
+        model_inputs = tokenizer(
+            sources,
+            max_length=max_length,
+            truncation=True,
+            padding=True,
+            return_tensors="pt"
+        )
+        
+        # Tokenize targets
+        with tokenizer.as_target_tokenizer():
+            labels = tokenizer(
+                examples['target'],
+                max_length=max_length,
+                truncation=True,
+                padding=True,
+                return_tensors="pt"
+            )
+        
+        model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
     
     data_loaders = {}
     
@@ -303,59 +342,40 @@ def create_data_loaders(
     return data_loaders
 
 def get_model_and_tokenizer(model_name: str):
-    """Get model and tokenizer for Vietnamese GEC"""
+    """Load model and tokenizer with mT5-specific handling"""
     
-    console.print(f"[bold blue]Loading model: {model_name}[/bold blue]")
+    # Check if it's an mT5 model
+    is_mt5 = any(mt5_variant in model_name.lower() for mt5_variant in [
+        'mt5', 't5', 'vit5'
+    ])
     
-    if 'bartpho' in model_name.lower():
-        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+    if is_mt5:
+        console.print(f"[blue]🔧 Detected T5/mT5 model: {model_name}[/blue]")
+        console.print("[yellow]📝 T5 models work best with task prefixes[/yellow]")
+        
+        # For mT5/T5 models, we need to handle prefixes
+        from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
         
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
         
-    elif 'vit5' in model_name.lower():
-        from transformers import T5ForConditionalGeneration, T5Tokenizer
-        
-        tokenizer = T5Tokenizer.from_pretrained(model_name)
-        model = T5ForConditionalGeneration.from_pretrained(model_name)
-        
-        # Add task prefix for ViT5
-        if not hasattr(tokenizer, 'task_prefix'):
-            tokenizer.task_prefix = "grammatical error correction: "
-            console.print(f"[yellow]Added ViT5 task prefix: {tokenizer.task_prefix}[/yellow]")
+        # Add special tokens if needed
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            
+        console.print(f"[green]✅ mT5/T5 model loaded with prefix support[/green]")
         
     else:
-        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+        # Handle BART and other models normally
+        from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
         
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-      # Add special tokens if needed
-    special_tokens = ['<gec>', '</gec>']
-    
-    # Safe way to check vocabulary for different tokenizer types
-    try:
-        if hasattr(tokenizer, 'vocab'):
-            # Standard tokenizers (BERT, etc.)
-            vocab = tokenizer.vocab
-        elif hasattr(tokenizer, 'get_vocab'):
-            # SentencePiece tokenizers (BARTpho, etc.)
-            vocab = tokenizer.get_vocab()
-        else:
-            # Fallback: assume all tokens are new
-            vocab = {}
         
-        new_tokens = [token for token in special_tokens if token not in vocab]
-        
-        if new_tokens:
-            tokenizer.add_tokens(new_tokens)
-            model.resize_token_embeddings(len(tokenizer))
-            console.print(f"[yellow]Added {len(new_tokens)} new tokens[/yellow]")
-        else:
-            console.print("[blue]No new tokens needed[/blue]")
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
             
-    except Exception as e:
-        console.print(f"[yellow]Warning: Could not check vocabulary - {e}[/yellow]")
-        # Skip adding special tokens if we can't check vocabulary
+        console.print(f"[green]✅ Model loaded normally[/green]")
     
     return model, tokenizer
 

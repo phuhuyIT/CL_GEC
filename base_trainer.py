@@ -399,23 +399,47 @@ class GECLightningModule(L.LightningModule):
         
         loss = outputs.loss
         
-        # Only do expensive generation and F0.5 calculation for a small subset
-        # This dramatically speeds up validation while still providing metrics
+        # Only do expensive generation and F0.5 calculation for a subset
+        # Increased frequency for more accurate validation metrics
         do_generation = (
             batch_idx == 0 or  # Always do first batch for examples
-            batch_idx % 50 == 0  # Every 50th batch for periodic F0.5 monitoring
+            batch_idx % 10 == 0  # Every 10th batch (increased from 50) for better F0.5 monitoring
         )
         
         if do_generation:
             # Generate predictions for evaluation (much faster settings)
             with torch.no_grad():
+                # Add task prefix for ViT5/mT5 models during validation
+                input_ids = batch['input_ids']
+                attention_mask = batch['attention_mask']
+                
+                # Check if we need to add task prefix (for ViT5/mT5)
+                if hasattr(self.tokenizer, 'task_prefix') and self.tokenizer.task_prefix:
+                    # Get source texts and add prefix
+                    source_texts = batch['source_text']
+                    prefixed_texts = [self.tokenizer.task_prefix + text for text in source_texts]
+                    
+                    # Re-tokenize with prefix
+                    prefixed_inputs = self.tokenizer(
+                        prefixed_texts,
+                        max_length=384,
+                        padding=True,
+                        truncation=True,
+                        return_tensors='pt'
+                    ).to(self.device)
+                    
+                    input_ids = prefixed_inputs['input_ids']
+                    attention_mask = prefixed_inputs['attention_mask']
+                
                 generated_ids = self.model.generate(
-                    input_ids=batch['input_ids'],
-                    attention_mask=batch['attention_mask'],
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
                     max_length=384,  
-                    num_beams=3,     # Reduced from 5
+                    num_beams=5,     # Match inference settings
                     early_stopping=True,
-                    do_sample=False
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id
                 )
             
             # Decode predictions and targets

@@ -14,6 +14,9 @@ HYPEROPT_PROGRESS_LOGGING_FIX.md
 H100_SECURITY_FIX.md
 install_security_deps.py
 debug_dependencies.py
+CONFIG_IMPORT_FIX.md
+test_multi_gpu.py
+MULTI_GPU_GUIDE.md
 
 # Python cache
 __pycache__/

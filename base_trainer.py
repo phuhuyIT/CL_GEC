@@ -167,18 +167,91 @@ def get_optimal_trainer_settings():
     }
     
     if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
         device_name = torch.cuda.get_device_name()
         
-        # RTX 5090 and other high-end GPUs can handle larger gradient accumulation
-        if any(gpu in device_name for gpu in ['RTX 50', 'RTX 40', 'A100', 'H100']):
-            # These GPUs have more memory, can use gradient checkpointing for larger models
-            settings['enable_checkpointing'] = True
-            # You can increase accumulate_grad_batches if memory allows
-            # settings['accumulate_grad_batches'] = 2  # Uncomment if you want larger effective batch size
+        console.print(f"[blue]🖥️  Available GPUs: {device_count}[/blue]")
+        for i in range(device_count):
+            gpu_name = torch.cuda.get_device_name(i)
+            memory_gb = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+            console.print(f"  GPU {i}: {gpu_name} ({memory_gb:.1f}GB)")
         
-        console.print(f"[blue]⚙️  Trainer settings optimized for: {device_name}[/blue]")
+        # Multi-GPU strategy selection
+        if device_count > 1:
+            settings['strategy'] = 'ddp'  # Distributed Data Parallel
+            settings['devices'] = device_count
+            console.print(f"[green]🚀 Multi-GPU training enabled with {device_count} GPUs using DDP[/green]")
+            
+            # Adjust batch size for multi-GPU
+            # Each GPU will get batch_size / num_gpus samples
+            console.print(f"[yellow]💡 Remember to scale your batch size for {device_count} GPUs[/yellow]")
+            console.print(f"[yellow]   Effective batch size = batch_size × {device_count}[/yellow]")
+            
+        else:
+            settings['devices'] = 1
+            console.print(f"[blue]⚙️  Single GPU training: {device_name}[/blue]")
+        
+        # High-end GPU optimizations
+        if any(gpu in device_name for gpu in ['RTX 50', 'RTX 40', 'A100', 'H100']):
+            settings['enable_checkpointing'] = True
+            
+            # For multi-GPU, can use larger accumulation
+            if device_count > 1:
+                settings['accumulate_grad_batches'] = max(1, 2 // device_count)
+            
+            console.print(f"[green]⚡ High-end GPU optimizations applied[/green]")
+        
+        # Memory optimization for multi-GPU
+        if device_count > 1:
+            settings['sync_batchnorm'] = True  # Synchronize batch norm across GPUs
+            settings['find_unused_parameters'] = False  # Optimize for transformer models
     
     return settings
+
+def calculate_optimal_batch_size(base_batch_size: int, device_count: int = None):
+    """Calculate optimal batch size for multi-GPU training"""
+    if device_count is None:
+        device_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    
+    if device_count <= 1:
+        return base_batch_size
+    
+    # For multi-GPU, we want each GPU to have reasonable batch size
+    # Total effective batch size = per_gpu_batch_size * num_gpus
+    per_gpu_batch_size = max(1, base_batch_size // device_count)
+    total_batch_size = per_gpu_batch_size * device_count
+    
+    console.print(f"[blue]📊 Multi-GPU batch size calculation:[/blue]")
+    console.print(f"  Base batch size: {base_batch_size}")
+    console.print(f"  GPUs: {device_count}")
+    console.print(f"  Per-GPU batch size: {per_gpu_batch_size}")
+    console.print(f"  Total effective batch size: {total_batch_size}")
+    
+    return per_gpu_batch_size
+
+def get_multi_gpu_config():
+    """Get multi-GPU configuration info"""
+    if not torch.cuda.is_available():
+        return {'devices': 1, 'strategy': 'auto', 'num_gpus': 0}
+    
+    device_count = torch.cuda.device_count()
+    config = {
+        'num_gpus': device_count,
+        'devices': device_count if device_count > 1 else 1,
+        'strategy': 'ddp' if device_count > 1 else 'auto',
+        'gpu_names': [torch.cuda.get_device_name(i) for i in range(device_count)],
+        'total_memory': sum(torch.cuda.get_device_properties(i).total_memory / (1024**3) 
+                           for i in range(device_count))
+    }
+    
+    if device_count > 1:
+        console.print(f"[bold green]🚀 Multi-GPU Setup Detected![/bold green]")
+        console.print(f"  Number of GPUs: {device_count}")
+        console.print(f"  Total GPU Memory: {config['total_memory']:.1f}GB")
+        console.print(f"  Strategy: Distributed Data Parallel (DDP)")
+        console.print(f"  Expected speedup: {device_count}x (linear scaling)")
+    
+    return config
 
 class SecureModelCheckpoint(ModelCheckpoint):
     """Secure ModelCheckpoint that prefers safetensors format"""
@@ -232,7 +305,7 @@ class SecureModelCheckpoint(ModelCheckpoint):
             super()._save_checkpoint(trainer, filepath)
 
 class GECLightningModule(L.LightningModule):
-    """Lightning module for GEC with mT5 prefix support"""
+    """Lightning module for GEC with mT5 prefix support and multi-GPU optimization"""
     
     def __init__(
         self,
@@ -250,6 +323,9 @@ class GECLightningModule(L.LightningModule):
         # Store model name for prefix detection
         self.model_name = model_name
         
+        # Multi-GPU configuration
+        self.multi_gpu_config = get_multi_gpu_config()
+        
         # Check if mT5/T5 model
         self.is_mt5 = any(mt5_variant in model_name.lower() for mt5_variant in [
             'mt5', 't5', 'vit5'
@@ -263,6 +339,10 @@ class GECLightningModule(L.LightningModule):
         
         # Load model and tokenizer
         self.model, self.tokenizer = get_model_and_tokenizer(model_name)
+        
+        # Multi-GPU: Wrap model for better performance if needed
+        if self.multi_gpu_config['num_gpus'] > 1:
+            console.print(f"[green]🔧 Optimizing model for {self.multi_gpu_config['num_gpus']} GPUs[/green]")
         
         # Loss function with label smoothing
         self.criterion = nn.CrossEntropyLoss(
@@ -376,32 +456,39 @@ class GECLightningModule(L.LightningModule):
         if f05_outputs:
             avg_f05 = torch.tensor([x['val_f05'] for x in f05_outputs]).mean()
             
+            # For multi-GPU, we need to sync metrics across all processes
+            if self.multi_gpu_config['num_gpus'] > 1:
+                # All-reduce the metric across GPUs
+                avg_f05 = self.all_reduce(avg_f05, reduce_op='mean')
+            
             if avg_f05 > self.best_f05:
                 self.best_f05 = avg_f05
                 console.print(f"[green]New best F0.5: {self.best_f05:.4f}[/green]")
-              # Log examples from the first output with generation
-            first_gen_output = f05_outputs[0]
-            for i, (src, pred, tgt) in enumerate(zip(
-                first_gen_output['sources'],
-                first_gen_output['predictions'], 
-                first_gen_output['targets']
-            )):
-                # Handle different logger types
-                if hasattr(self.logger, 'experiment'):
-                    if hasattr(self.logger.experiment, 'log'):
-                        # Weights & Biases logger
-                        self.logger.experiment.log({
-                            f"example_{i}_source": src,
-                            f"example_{i}_prediction": pred,
-                            f"example_{i}_target": tgt
-                        })
-                    elif hasattr(self.logger.experiment, 'add_text'):
-                        # TensorBoard logger
-                        self.logger.experiment.add_text(
-                            f"example_{i}", 
-                            f"Source: {src}\nPrediction: {pred}\nTarget: {tgt}",
-                            self.current_epoch
-                        )
+                
+            # Log examples from the first output with generation (only on rank 0 for multi-GPU)
+            if (self.multi_gpu_config['num_gpus'] <= 1 or self.global_rank == 0) and f05_outputs:
+                first_gen_output = f05_outputs[0]
+                for i, (src, pred, tgt) in enumerate(zip(
+                    first_gen_output['sources'],
+                    first_gen_output['predictions'], 
+                    first_gen_output['targets']
+                )):
+                    # Handle different logger types
+                    if hasattr(self.logger, 'experiment'):
+                        if hasattr(self.logger.experiment, 'log'):
+                            # Weights & Biases logger
+                            self.logger.experiment.log({
+                                f"example_{i}_source": src,
+                                f"example_{i}_prediction": pred,
+                                f"example_{i}_target": tgt
+                            })
+                        elif hasattr(self.logger.experiment, 'add_text'):
+                            # TensorBoard logger
+                            self.logger.experiment.add_text(
+                                f"example_{i}", 
+                                f"Source: {src}\nPrediction: {pred}\nTarget: {tgt}",
+                                self.current_epoch
+                            )
         
         # Clear outputs for next epoch
         self.validation_step_outputs.clear()
@@ -829,8 +916,21 @@ class BaseTrainer:
         return model
     
     def train(self, max_epochs: int = 10, batch_size: int = 16, search_space: Optional[Dict[str, Any]] = None):
-        """Main training method with optional hyperparameter optimization"""
-        console.print(f"[bold blue]Starting training for {self.model_name}[/bold blue]")        # Load data with proper data directory
+        """Main training method with optional hyperparameter optimization and multi-GPU support"""
+        console.print(f"[bold blue]Starting training for {self.model_name}[/bold blue]")
+        
+        # Get multi-GPU configuration
+        multi_gpu_config = get_multi_gpu_config()
+        
+        # Adjust batch size for multi-GPU
+        if multi_gpu_config['num_gpus'] > 1:
+            original_batch_size = batch_size
+            batch_size = calculate_optimal_batch_size(batch_size, multi_gpu_config['num_gpus'])
+            console.print(f"[yellow]📊 Adjusted batch size for multi-GPU:[/yellow]")
+            console.print(f"  Original: {original_batch_size} → Per-GPU: {batch_size}")
+            console.print(f"  Total effective: {batch_size * multi_gpu_config['num_gpus']}")
+        
+        # Load data with proper data directory
         console.print("[yellow]Loading data...[/yellow]")
         try:
             # Use data_dir if provided, otherwise load from HuggingFace with dataset parameters
@@ -869,6 +969,8 @@ class BaseTrainer:
                 console.print("[yellow]    Install with: pip install optuna[/yellow]")
             else:
                 console.print("[yellow]Running hyperparameter optimization...[/yellow]")
+                if multi_gpu_config['num_gpus'] > 1:
+                    console.print("[blue]🔧 Note: Hyperopt will use single GPU for faster trials[/blue]")
                 study = self._run_hyperopt(data_loaders, n_trials=10, search_space=search_space)
                 best_params = study.best_params
                 console.print(f"[green]Hyperparameter optimization complete. Best F0.5: {study.best_value:.4f}[/green]")

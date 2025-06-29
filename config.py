@@ -9,7 +9,7 @@ import os
 @dataclass
 class DataConfig:
     """Data configuration"""
-    dataset_name: str = "phuhuy-se1/viGEC"
+    dataset_name: str = "phuhuy-se1/viGEC_v2"
     cache_dir: Optional[str] = None
     max_length: int = 384
     test_subset_ratio: float = 0.05  # Use 5% of test set for faster evaluation

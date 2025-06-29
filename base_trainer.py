@@ -178,12 +178,25 @@ def get_optimal_trainer_settings():
         
         # Multi-GPU strategy selection
         if device_count > 1:
-            settings['strategy'] = 'ddp'  # Distributed Data Parallel
+            # Create DDP strategy with proper configuration
+            try:
+                from lightning.pytorch.strategies import DDPStrategy
+                
+                ddp_strategy = DDPStrategy(
+                    find_unused_parameters=False,  # Optimize for transformer models
+                    gradient_as_bucket_view=True,  # Memory optimization
+                )
+                settings['strategy'] = ddp_strategy
+                
+            except ImportError:
+                # Fallback to string strategy
+                console.print("[yellow]⚠️  Using fallback DDP strategy[/yellow]")
+                settings['strategy'] = 'ddp'
+            
             settings['devices'] = device_count
             console.print(f"[green]🚀 Multi-GPU training enabled with {device_count} GPUs using DDP[/green]")
             
             # Adjust batch size for multi-GPU
-            # Each GPU will get batch_size / num_gpus samples
             console.print(f"[yellow]💡 Remember to scale your batch size for {device_count} GPUs[/yellow]")
             console.print(f"[yellow]   Effective batch size = batch_size × {device_count}[/yellow]")
             
@@ -201,10 +214,9 @@ def get_optimal_trainer_settings():
             
             console.print(f"[green]⚡ High-end GPU optimizations applied[/green]")
         
-        # Memory optimization for multi-GPU
+        # Memory optimization settings
         if device_count > 1:
             settings['sync_batchnorm'] = True  # Synchronize batch norm across GPUs
-            settings['find_unused_parameters'] = False  # Optimize for transformer models
     
     return settings
 
@@ -873,13 +885,26 @@ class BaseTrainer:
         precision = get_optimal_precision()
         trainer_settings = get_optimal_trainer_settings()
         console.print(f"[blue]🎯 Using precision: {precision}[/blue]")
+        console.print(f"[dim]📋 Trainer settings: {list(trainer_settings.keys())}[/dim]")
+        
+        # Filter out any invalid trainer arguments
+        valid_trainer_args = {
+            'strategy', 'devices', 'enable_checkpointing', 'accumulate_grad_batches', 
+            'sync_batchnorm', 'num_nodes', 'enable_progress_bar', 'enable_model_summary'
+        }
+        filtered_settings = {k: v for k, v in trainer_settings.items() if k in valid_trainer_args}
+        
+        if len(filtered_settings) != len(trainer_settings):
+            removed_args = set(trainer_settings.keys()) - set(filtered_settings.keys())
+            console.print(f"[yellow]⚠️  Filtered out invalid Trainer args: {removed_args}[/yellow]")
+        
         trainer = L.Trainer(
             max_epochs=max_epochs,
             logger=wandb_logger,
             callbacks=callbacks,
             accelerator='auto',
             precision=precision,
-            **trainer_settings
+            **filtered_settings
         )
         
         # Train

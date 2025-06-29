@@ -59,54 +59,78 @@ class F05Evaluator:
         return tokens
     
     def calculate_f05(self, source: str, prediction: str, target: str) -> float:
-        """Calculate F0.5 score for a single sentence"""
+        """Calculate F0.5 score for a single sentence using consistent edit detection"""
         
-        # Tokenize
-        source_tokens = set(self.tokenize_sentence(source))
-        pred_tokens = set(self.tokenize_sentence(prediction))
-        target_tokens = set(self.tokenize_sentence(target))
+        # Use consistent edit detection method
+        precision, recall = self.calculate_precision_recall(source, prediction, target)
         
-        # Calculate edits
-        source_to_pred = pred_tokens - source_tokens  # Additions in prediction
-        source_to_target = target_tokens - source_tokens  # Additions in target (gold)
-        
-        pred_to_source = source_tokens - pred_tokens  # Deletions in prediction
-        target_to_source = source_tokens - target_tokens  # Deletions in target (gold)
-        
-        # True positives: correct additions and deletions
-        tp_additions = len(source_to_pred & source_to_target)
-        tp_deletions = len(pred_to_source & target_to_source)
-        tp = tp_additions + tp_deletions
-        
-        # False positives: incorrect additions and deletions
-        fp_additions = len(source_to_pred - source_to_target)
-        fp_deletions = len(pred_to_source - target_to_source)
-        fp = fp_additions + fp_deletions
-        
-        # False negatives: missed additions and deletions
-        fn_additions = len(source_to_target - source_to_pred)
-        fn_deletions = len(target_to_source - pred_to_source)
-        fn = fn_additions + fn_deletions
-        
-        # Calculate F0.5
-        if tp + fp == 0:
-            precision = 0.0
-        else:
-            precision = tp / (tp + fp)
-            
-        if tp + fn == 0:
-            recall = 0.0
-        else:
-            recall = tp / (tp + fn)
-            
         if precision + recall == 0:
-            f05 = 0.0
-        else:
-            # F0.5 weights precision higher than recall
-            beta = 0.5
-            f05 = (1 + beta**2) * precision * recall / (beta**2 * precision + recall)
-            
+            return 0.0
+        
+        # F0.5 weights precision higher than recall
+        # Formula: F_beta = (1 + beta^2) * precision * recall / (beta^2 * precision + recall)
+        beta = 0.5
+        f05 = (1 + beta**2) * precision * recall / (beta**2 * precision + recall)
+        
         return f05
+    
+    def calculate_precision_recall(self, source: str, prediction: str, target: str) -> Tuple[float, float]:
+        """Calculate precision and recall using proper edit alignment"""
+        
+        # Tokenize sequences
+        source_tokens = self.tokenize_sentence(source)
+        pred_tokens = self.tokenize_sentence(prediction)
+        target_tokens = self.tokenize_sentence(target)
+        
+        # Use a more sophisticated edit distance calculation
+        pred_edits = self._get_sequence_edits(source_tokens, pred_tokens)
+        target_edits = self._get_sequence_edits(source_tokens, target_tokens)
+        
+        # Count matches
+        tp = len(pred_edits & target_edits)
+        fp = len(pred_edits - target_edits)
+        fn = len(target_edits - pred_edits)
+        
+        # Calculate precision and recall
+        precision = tp / (tp + fp) if (tp + fp) > 0 else (1.0 if fn == 0 else 0.0)
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 1.0
+        
+        return precision, recall
+    
+    def _get_sequence_edits(self, source: List[str], target: List[str]) -> set:
+        """Get edit operations between source and target sequences"""
+        
+        # Use a simple but more accurate edit detection
+        # This is a simplified version of edit distance
+        
+        edits = set()
+        
+        # Convert to sets for token-level comparison, but preserve some position info
+        source_multiset = {}
+        target_multiset = {}
+        
+        # Count occurrences
+        for i, token in enumerate(source):
+            source_multiset[token] = source_multiset.get(token, 0) + 1
+            
+        for i, token in enumerate(target):
+            target_multiset[token] = target_multiset.get(token, 0) + 1
+        
+        # Find additions (tokens in target but not in source, or more in target)
+        for token, target_count in target_multiset.items():
+            source_count = source_multiset.get(token, 0)
+            if target_count > source_count:
+                for i in range(target_count - source_count):
+                    edits.add(f"ADD_{token}_{i}")
+        
+        # Find deletions (tokens in source but not in target, or fewer in target)
+        for token, source_count in source_multiset.items():
+            target_count = target_multiset.get(token, 0)
+            if source_count > target_count:
+                for i in range(source_count - target_count):
+                    edits.add(f"DEL_{token}_{i}")
+        
+        return edits
 
 class GECEvaluator:
     """Comprehensive evaluator for GEC systems"""
@@ -210,33 +234,10 @@ class GECEvaluator:
         prediction: str, 
         target: str
     ) -> Tuple[float, float]:
-        """Calculate precision and recall for edits"""
+        """Calculate precision and recall for edits using consistent method"""
         
-        # Tokenize
-        source_tokens = self.f05_evaluator.tokenize_sentence(source)
-        pred_tokens = self.f05_evaluator.tokenize_sentence(prediction)
-        target_tokens = self.f05_evaluator.tokenize_sentence(target)
-        
-        # Calculate edits
-        pred_edits = self._get_edits(source_tokens, pred_tokens)
-        target_edits = self._get_edits(source_tokens, target_tokens)
-        
-        # True positives
-        tp = len(pred_edits & target_edits)
-        
-        # Precision
-        if len(pred_edits) == 0:
-            precision = 1.0 if len(target_edits) == 0 else 0.0
-        else:
-            precision = tp / len(pred_edits)
-        
-        # Recall
-        if len(target_edits) == 0:
-            recall = 1.0
-        else:
-            recall = tp / len(target_edits)
-        
-        return precision, recall
+        # Use the same method as F0.5 evaluator for consistency
+        return self.f05_evaluator.calculate_precision_recall(source, prediction, target)
     
     def _get_edits(self, source: List[str], target: List[str]) -> set:
         """Get edit operations between source and target"""

@@ -9,14 +9,33 @@ import numpy as np
 from collections import Counter
 import nltk
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from rouge_score import rouge_scorer
-import evaluate
+from nltk.translate.gleu_score import sentence_gleu
+try:
+    from rouge_score import rouge_scorer
+    ROUGE_AVAILABLE = True
+except ImportError:
+    ROUGE_AVAILABLE = False
+    rouge_scorer = None
+
+try:
+    import evaluate
+    EVALUATE_AVAILABLE = True
+except ImportError:
+    EVALUATE_AVAILABLE = False
+    evaluate = None
+
 from rich.console import Console
 
 console = Console()
 
 # Download required NLTK data
 try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
+
+try:
+    # Download required NLTK data for GLEU
     nltk.data.find('tokenizers/punkt')
 except LookupError:
     nltk.download('punkt')
@@ -95,11 +114,22 @@ class GECEvaluator:
     def __init__(self, tokenizer=None):
         self.tokenizer = tokenizer
         self.f05_evaluator = F05Evaluator(tokenizer)
-        self.rouge_scorer = rouge_scorer.RougeScorer(
-            ['rouge1', 'rouge2', 'rougeL'], 
-            use_stemmer=False
-        )
-        self.bleu_evaluator = evaluate.load("bleu")
+        
+        # Initialize ROUGE scorer if available
+        if ROUGE_AVAILABLE:
+            self.rouge_scorer = rouge_scorer.RougeScorer(
+                ['rouge1', 'rouge2', 'rougeL'], 
+                use_stemmer=False
+            )
+        else:
+            self.rouge_scorer = None
+            console.print("[yellow]⚠️  ROUGE not available. Install rouge-score: pip install rouge-score[/yellow]")
+        
+        # Initialize BLEU evaluator if available
+        if EVALUATE_AVAILABLE:
+            self.bleu_evaluator = evaluate.load("bleu")
+        else:
+            self.bleu_evaluator = None
         
     def evaluate_batch(
         self, 
@@ -114,6 +144,7 @@ class GECEvaluator:
         results = {
             'f05_scores': [],
             'bleu_scores': [],
+            'gleu_scores': [],
             'rouge1_f': [],
             'rouge2_f': [],
             'rougeL_f': [],
@@ -136,15 +167,29 @@ class GECEvaluator:
                     pred_tokens,
                     smoothing_function=self.f05_evaluator.smoothing.method1
                 )
+                # GLEU score (GLEU is more suitable for GEC than BLEU)
+                gleu = sentence_gleu(
+                    [target_tokens],
+                    pred_tokens,
+                    min_len=1,
+                    max_len=4
+                )
             else:
                 bleu = 0.0
+                gleu = 0.0
             results['bleu_scores'].append(bleu)
+            results['gleu_scores'].append(gleu)
             
             # ROUGE scores
-            rouge_scores = self.rouge_scorer.score(target, pred)
-            results['rouge1_f'].append(rouge_scores['rouge1'].fmeasure)
-            results['rouge2_f'].append(rouge_scores['rouge2'].fmeasure)
-            results['rougeL_f'].append(rouge_scores['rougeL'].fmeasure)
+            if ROUGE_AVAILABLE and self.rouge_scorer:
+                rouge_scores = self.rouge_scorer.score(target, pred)
+                results['rouge1_f'].append(rouge_scores['rouge1'].fmeasure)
+                results['rouge2_f'].append(rouge_scores['rouge2'].fmeasure)
+                results['rougeL_f'].append(rouge_scores['rougeL'].fmeasure)
+            else:
+                results['rouge1_f'].append(0.0)
+                results['rouge2_f'].append(0.0)
+                results['rougeL_f'].append(0.0)
             
             # Precision and Recall for edits
             precision, recall = self._calculate_edit_precision_recall(source, pred, target)
@@ -325,6 +370,131 @@ class GECEvaluator:
             console.print(f"[green]Report saved to {output_path}[/green]")
         
         return report
+    
+    def calculate_all_metrics(
+        self,
+        sources: List[str],
+        predictions: List[str],
+        targets: List[str],
+        print_results: bool = True
+    ) -> Dict[str, float]:
+        """Calculate all metrics in one go with nice formatting"""
+        
+        console.print("[bold blue]📊 Calculating Comprehensive Metrics...[/bold blue]")
+        
+        # Get main metrics
+        results = self.evaluate_batch(sources, predictions, targets)
+        
+        # Calculate additional metrics
+        ie_oe_results = self.calculate_ie_oe_ratio(sources, predictions, targets)
+        results.update(ie_oe_results)
+        
+        if print_results:
+            self._print_metrics_table(results, len(sources))
+        
+        return results
+    
+    def _print_metrics_table(self, results: Dict[str, float], num_samples: int):
+        """Print metrics in a nice table format"""
+        
+        from rich.table import Table
+        
+        table = Table(title=f"📈 Evaluation Results ({num_samples} samples)")
+        table.add_column("Metric", style="cyan", no_wrap=True)
+        table.add_column("Score", style="magenta")
+        table.add_column("Percentage", style="green")
+        table.add_column("Description", style="dim")
+        
+        # Core metrics
+        if 'f05' in results:
+            table.add_row(
+                "F0.5", 
+                f"{results['f05']:.4f}", 
+                f"{results['f05']*100:.1f}%",
+                "Edit-level F0.5 (precision-weighted)"
+            )
+        
+        if 'precision' in results:
+            table.add_row(
+                "Precision", 
+                f"{results['precision']:.4f}", 
+                f"{results['precision']*100:.1f}%",
+                "Edit precision"
+            )
+        
+        if 'recall' in results:
+            table.add_row(
+                "Recall", 
+                f"{results['recall']:.4f}", 
+                f"{results['recall']*100:.1f}%",
+                "Edit recall"
+            )
+        
+        # Translation metrics
+        if 'bleu' in results:
+            table.add_row(
+                "BLEU", 
+                f"{results['bleu']:.4f}", 
+                f"{results['bleu']*100:.1f}%",
+                "BLEU score (n-gram overlap)"
+            )
+        
+        if 'gleu' in results:
+            table.add_row(
+                "GLEU", 
+                f"{results['gleu']:.4f}", 
+                f"{results['gleu']*100:.1f}%",
+                "GLEU score (better for GEC)"
+            )
+        
+        # ROUGE metrics
+        if 'rouge1_f' in results:
+            table.add_row(
+                "ROUGE-1", 
+                f"{results['rouge1_f']:.4f}", 
+                f"{results['rouge1_f']*100:.1f}%",
+                "Unigram overlap"
+            )
+        
+        if 'rouge2_f' in results:
+            table.add_row(
+                "ROUGE-2", 
+                f"{results['rouge2_f']:.4f}", 
+                f"{results['rouge2_f']*100:.1f}%",
+                "Bigram overlap"
+            )
+        
+        if 'rougeL_f' in results:
+            table.add_row(
+                "ROUGE-L", 
+                f"{results['rougeL_f']:.4f}", 
+                f"{results['rougeL_f']*100:.1f}%",
+                "Longest common subsequence"
+            )
+        
+        # Additional metrics
+        if 'ie_ratio' in results:
+            table.add_row(
+                "IE Ratio", 
+                f"{results['ie_ratio']:.4f}", 
+                f"{results['ie_ratio']*100:.1f}%",
+                "Input-preserving edit ratio"
+            )
+        
+        console.print(table)
+        
+        # Summary
+        if 'f05' in results:
+            f05_score = results['f05']
+            if f05_score >= 0.8:
+                console.print(f"[bold green]🎉 Excellent performance! F0.5 = {f05_score:.3f}[/bold green]")
+            elif f05_score >= 0.6:
+                console.print(f"[green]👍 Good performance! F0.5 = {f05_score:.3f}[/green]")
+            elif f05_score >= 0.4:
+                console.print(f"[yellow]📊 Moderate performance. F0.5 = {f05_score:.3f}[/yellow]")
+            else:
+                console.print(f"[red]📉 Low performance. F0.5 = {f05_score:.3f}[/red]")
+                console.print("[blue]💡 Consider checking model training, data preprocessing, or task prefix[/blue]")
 
 if __name__ == "__main__":
     # Example usage

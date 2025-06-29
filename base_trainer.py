@@ -158,6 +158,36 @@ def get_optimal_precision():
     # For older GPUs without Tensor Cores
     return "32-true"
 
+def is_interactive_environment():
+    """Detect if running in interactive environment (Jupyter/Colab/Kaggle)"""
+    try:
+        # Check for Jupyter/IPython
+        from IPython import get_ipython
+        if get_ipython() is not None:
+            return True
+    except ImportError:
+        pass
+    
+    # Check for Google Colab
+    try:
+        import google.colab
+        return True
+    except ImportError:
+        pass
+    
+    # Check for Kaggle
+    try:
+        import kaggle
+        return True
+    except ImportError:
+        pass
+    
+    # Check environment variables
+    if any(env in os.environ for env in ['COLAB_GPU', 'KAGGLE_KERNEL_RUN_TYPE', 'JPY_PARENT_PID']):
+        return True
+    
+    return False
+
 def get_optimal_trainer_settings():
     """Get optimal trainer settings based on available hardware"""
     settings = {
@@ -169,8 +199,12 @@ def get_optimal_trainer_settings():
     if torch.cuda.is_available():
         device_count = torch.cuda.device_count()
         device_name = torch.cuda.get_device_name()
+        is_interactive = is_interactive_environment()
         
         console.print(f"[blue]🖥️  Available GPUs: {device_count}[/blue]")
+        if is_interactive:
+            console.print(f"[blue]📓 Interactive environment detected (Jupyter/Colab/Kaggle)[/blue]")
+        
         for i in range(device_count):
             gpu_name = torch.cuda.get_device_name(i)
             memory_gb = torch.cuda.get_device_properties(i).total_memory / (1024**3)
@@ -178,23 +212,29 @@ def get_optimal_trainer_settings():
         
         # Multi-GPU strategy selection
         if device_count > 1:
-            # Create DDP strategy with proper configuration
-            try:
-                from lightning.pytorch.strategies import DDPStrategy
-                
-                ddp_strategy = DDPStrategy(
-                    find_unused_parameters=False,  # Optimize for transformer models
-                    gradient_as_bucket_view=True,  # Memory optimization
-                )
-                settings['strategy'] = ddp_strategy
-                
-            except ImportError:
-                # Fallback to string strategy
-                console.print("[yellow]⚠️  Using fallback DDP strategy[/yellow]")
-                settings['strategy'] = 'ddp'
+            if is_interactive:
+                # Use ddp_notebook strategy for interactive environments
+                console.print("[yellow]🔧 Using ddp_notebook strategy for interactive environment[/yellow]")
+                settings['strategy'] = 'ddp_notebook'
+            else:
+                # Create DDP strategy with proper configuration for script environments
+                try:
+                    from lightning.pytorch.strategies import DDPStrategy
+                    
+                    ddp_strategy = DDPStrategy(
+                        find_unused_parameters=False,  # Optimize for transformer models
+                        gradient_as_bucket_view=True,  # Memory optimization
+                    )
+                    settings['strategy'] = ddp_strategy
+                    
+                except ImportError:
+                    # Fallback to string strategy
+                    console.print("[yellow]⚠️  Using fallback DDP strategy[/yellow]")
+                    settings['strategy'] = 'ddp'
             
             settings['devices'] = device_count
-            console.print(f"[green]🚀 Multi-GPU training enabled with {device_count} GPUs using DDP[/green]")
+            strategy_name = 'DDP Notebook' if is_interactive else 'DDP'
+            console.print(f"[green]🚀 Multi-GPU training enabled with {device_count} GPUs using {strategy_name}[/green]")
             
             # Adjust batch size for multi-GPU
             console.print(f"[yellow]💡 Remember to scale your batch size for {device_count} GPUs[/yellow]")
@@ -247,20 +287,33 @@ def get_multi_gpu_config():
         return {'devices': 1, 'strategy': 'auto', 'num_gpus': 0}
     
     device_count = torch.cuda.device_count()
+    is_interactive = is_interactive_environment()
+    
+    # Determine strategy based on environment
+    if device_count > 1:
+        strategy = 'ddp_notebook' if is_interactive else 'ddp'
+    else:
+        strategy = 'auto'
+    
     config = {
         'num_gpus': device_count,
         'devices': device_count if device_count > 1 else 1,
-        'strategy': 'ddp' if device_count > 1 else 'auto',
+        'strategy': strategy,
+        'is_interactive': is_interactive,
         'gpu_names': [torch.cuda.get_device_name(i) for i in range(device_count)],
         'total_memory': sum(torch.cuda.get_device_properties(i).total_memory / (1024**3) 
                            for i in range(device_count))
     }
     
     if device_count > 1:
+        env_type = "Interactive (Jupyter/Colab/Kaggle)" if is_interactive else "Script"
+        strategy_name = "DDP Notebook" if is_interactive else "DDP"
+        
         console.print(f"[bold green]🚀 Multi-GPU Setup Detected![/bold green]")
+        console.print(f"  Environment: {env_type}")
         console.print(f"  Number of GPUs: {device_count}")
         console.print(f"  Total GPU Memory: {config['total_memory']:.1f}GB")
-        console.print(f"  Strategy: Distributed Data Parallel (DDP)")
+        console.print(f"  Strategy: {strategy_name}")
         console.print(f"  Expected speedup: {device_count}x (linear scaling)")
     
     return config
@@ -581,7 +634,7 @@ class HyperparameterOptimizer:
         self.test_subset_ratio = test_subset_ratio
         self.search_space = search_space or {}
         
-    def objective(self, trial: optuna.Trial) -> float:
+    def objective(self, trial) -> float:
         """Objective function for Optuna optimization"""
         
         if optuna is None:

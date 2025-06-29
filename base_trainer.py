@@ -197,27 +197,45 @@ def get_optimal_trainer_settings():
     }
     
     if torch.cuda.is_available():
-        device_count = torch.cuda.device_count()
-        device_name = torch.cuda.get_device_name()
         is_interactive = is_interactive_environment()
         
-        console.print(f"[blue]🖥️  Available GPUs: {device_count}[/blue]")
+        # For interactive environments, we need to be careful about CUDA initialization
         if is_interactive:
-            console.print(f"[blue]📓 Interactive environment detected (Jupyter/Colab/Kaggle)[/blue]")
-        
-        for i in range(device_count):
-            gpu_name = torch.cuda.get_device_name(i)
-            memory_gb = torch.cuda.get_device_properties(i).total_memory / (1024**3)
-            console.print(f"  GPU {i}: {gpu_name} ({memory_gb:.1f}GB)")
-        
-        # Multi-GPU strategy selection
-        if device_count > 1:
-            if is_interactive:
-                # Use ddp_notebook strategy for interactive environments
-                console.print("[yellow]🔧 Using ddp_notebook strategy for interactive environment[/yellow]")
-                settings['strategy'] = 'ddp_notebook'
+            # Use environment variables or lazy detection to avoid CUDA context issues
+            device_count = torch.cuda.device_count()  # This is safe in most cases
+            
+            console.print(f"[blue]📓 Interactive environment detected[/blue]")
+            console.print(f"[blue]🖥️  Available GPUs: {device_count}[/blue]")
+            
+            if device_count > 1:
+                # For multi-GPU in interactive environments, use ddp_spawn strategy
+                # This avoids the multiprocessing launcher issues
+                console.print("[yellow]� Using ddp_spawn strategy for interactive multi-GPU[/yellow]")
+                settings['strategy'] = 'ddp_spawn'  # Better for interactive environments
+                settings['devices'] = device_count
+                
+                console.print(f"[green]🚀 Multi-GPU training enabled with {device_count} GPUs using DDP Spawn[/green]")
+                console.print("[blue]💡 DDP Spawn avoids CUDA context conflicts in notebooks[/blue]")
+                
+                # Adjust batch size for multi-GPU
+                console.print(f"[yellow]💡 Remember to scale your batch size for {device_count} GPUs[/yellow]")
+                console.print(f"[yellow]   Effective batch size = batch_size × {device_count}[/yellow]")
             else:
-                # Create DDP strategy with proper configuration for script environments
+                settings['devices'] = 1
+                console.print(f"[blue]⚙️  Single GPU training in interactive environment[/blue]")
+                
+        else:
+            # Script environment - safe to get detailed GPU info
+            device_count = torch.cuda.device_count()
+            device_name = torch.cuda.get_device_name() if device_count > 0 else "Unknown"
+            
+            console.print(f"[blue]🖥️  Available GPUs: {device_count}[/blue]")
+            if device_count > 0:
+                console.print(f"  GPU 0: {device_name}")
+            
+            # Multi-GPU strategy selection for script environments
+            if device_count > 1:
+                # Create DDP strategy with proper configuration
                 try:
                     from lightning.pytorch.strategies import DDPStrategy
                     
@@ -231,31 +249,20 @@ def get_optimal_trainer_settings():
                     # Fallback to string strategy
                     console.print("[yellow]⚠️  Using fallback DDP strategy[/yellow]")
                     settings['strategy'] = 'ddp'
-            
-            settings['devices'] = device_count
-            strategy_name = 'DDP Notebook' if is_interactive else 'DDP'
-            console.print(f"[green]🚀 Multi-GPU training enabled with {device_count} GPUs using {strategy_name}[/green]")
-            
-            # Adjust batch size for multi-GPU
-            console.print(f"[yellow]💡 Remember to scale your batch size for {device_count} GPUs[/yellow]")
-            console.print(f"[yellow]   Effective batch size = batch_size × {device_count}[/yellow]")
-            
-        else:
-            settings['devices'] = 1
-            console.print(f"[blue]⚙️  Single GPU training: {device_name}[/blue]")
-        
-        # High-end GPU optimizations
-        if any(gpu in device_name for gpu in ['RTX 50', 'RTX 40', 'A100', 'H100']):
-            settings['enable_checkpointing'] = True
-            
-            # For multi-GPU, can use larger accumulation
-            if device_count > 1:
-                settings['accumulate_grad_batches'] = max(1, 2 // device_count)
-            
-            console.print(f"[green]⚡ High-end GPU optimizations applied[/green]")
+                
+                settings['devices'] = device_count
+                console.print(f"[green]🚀 Multi-GPU training enabled with {device_count} GPUs using DDP[/green]")
+                
+                # Adjust batch size for multi-GPU
+                console.print(f"[yellow]💡 Remember to scale your batch size for {device_count} GPUs[/yellow]")
+                console.print(f"[yellow]   Effective batch size = batch_size × {device_count}[/yellow]")
+                
+            else:
+                settings['devices'] = 1
+                console.print(f"[blue]⚙️  Single GPU training: {device_name}[/blue]")
         
         # Memory optimization settings
-        if device_count > 1:
+        if torch.cuda.device_count() > 1:
             settings['sync_batchnorm'] = True  # Synchronize batch norm across GPUs
     
     return settings
@@ -291,7 +298,11 @@ def get_multi_gpu_config():
     
     # Determine strategy based on environment
     if device_count > 1:
-        strategy = 'ddp_notebook' if is_interactive else 'ddp'
+        if is_interactive:
+            # Use ddp_spawn for interactive environments to avoid CUDA context issues
+            strategy = 'ddp_spawn'
+        else:
+            strategy = 'ddp'
     else:
         strategy = 'auto'
     
@@ -300,21 +311,22 @@ def get_multi_gpu_config():
         'devices': device_count if device_count > 1 else 1,
         'strategy': strategy,
         'is_interactive': is_interactive,
-        'gpu_names': [torch.cuda.get_device_name(i) for i in range(device_count)],
-        'total_memory': sum(torch.cuda.get_device_properties(i).total_memory / (1024**3) 
-                           for i in range(device_count))
+        'gpu_names': [],  # Avoid early GPU info calls to prevent CUDA context issues
+        'total_memory': 0  # Will be filled later when safe
     }
     
     if device_count > 1:
         env_type = "Interactive (Jupyter/Colab/Kaggle)" if is_interactive else "Script"
-        strategy_name = "DDP Notebook" if is_interactive else "DDP"
+        strategy_name = "DDP Spawn" if is_interactive else "DDP"
         
         console.print(f"[bold green]🚀 Multi-GPU Setup Detected![/bold green]")
         console.print(f"  Environment: {env_type}")
         console.print(f"  Number of GPUs: {device_count}")
-        console.print(f"  Total GPU Memory: {config['total_memory']:.1f}GB")
         console.print(f"  Strategy: {strategy_name}")
         console.print(f"  Expected speedup: {device_count}x (linear scaling)")
+        
+        if is_interactive:
+            console.print("[blue]💡 Using DDP Spawn to avoid CUDA context conflicts[/blue]")
     
     return config
 

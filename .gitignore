@@ -18,6 +18,7 @@ CONFIG_IMPORT_FIX.md
 test_multi_gpu.py
 MULTI_GPU_GUIDE.md
 INTERACTIVE_DDP_FIX.md
+CUDA_CONTEXT_FIX.md
 test_interactive_fix.py
 
 # Python cache

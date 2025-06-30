@@ -100,7 +100,27 @@ setup_secure_model_loading()
 
 def setup_tensor_cores():
     """Setup optimal Tensor Core configuration for different GPU architectures"""
-    if torch.cuda.is_available():
+    if not torch.cuda.is_available():
+        console.print("[yellow]⚠️  CUDA not available, running on CPU[/yellow]")
+        return
+    
+    # Avoid early CUDA context initialization in interactive environments
+    is_interactive = is_interactive_environment()
+    
+    if is_interactive:
+        # In interactive environments, defer GPU name detection to avoid CUDA context init
+        console.print(f"[blue]🖥️  GPU detected (details deferred for notebook compatibility)[/blue]")
+        
+        # Use conservative defaults for interactive environments
+        try:
+            torch.set_float32_matmul_precision('medium')  # Safe default
+            console.print(f"[green]✅ Tensor Cores enabled with conservative settings for notebook[/green]")
+        except:
+            console.print(f"[yellow]⚠️  Could not set matmul precision in notebook environment[/yellow]")
+        return
+    
+    # For script environments, safe to get device details
+    try:
         device_name = torch.cuda.get_device_name()
         console.print(f"[blue]🖥️  Detected GPU: {device_name}[/blue]")
         
@@ -129,34 +149,54 @@ def setup_tensor_cores():
             console.print(f"[green]✅ Tensor Cores enabled with '{precision_mode}' precision[/green]")
         else:
             console.print("[yellow]⚠️  Tensor Cores not detected or not supported on this GPU[/yellow]")
-    else:
-        console.print("[yellow]⚠️  CUDA not available, running on CPU[/yellow]")
+            
+    except RuntimeError as e:
+        console.print(f"[yellow]⚠️  Could not detect GPU details: {e}[/yellow]")
+        console.print(f"[blue]Using conservative tensor core settings[/blue]")
+        try:
+            torch.set_float32_matmul_precision('medium')
+        except:
+            pass  # Ignore if we can't set precision
 
-# Setup Tensor Cores at module import
-setup_tensor_cores()
+# Setup Tensor Cores at module import - DISABLED to avoid CUDA context initialization
+# This will be called safely during trainer initialization instead
+# setup_tensor_cores()
 
 def get_optimal_precision():
     """Get optimal precision setting based on available hardware"""
     if not torch.cuda.is_available():
         return "32-true"
     
-    device_name = torch.cuda.get_device_name()
+    # Avoid CUDA context initialization in interactive environments
+    is_interactive = is_interactive_environment()
     
-    # RTX 50/40 series and H100 can handle bf16 very well
-    if any(gpu in device_name for gpu in ['RTX 50', 'RTX 40', 'H100', 'H200']):
-        # Check if bfloat16 is supported
-        if torch.cuda.is_bf16_supported():
-            return "bf16-mixed"  # Best for newest GPUs
-        else:
+    if is_interactive:
+        # Use safe defaults for interactive environments
+        return "16-mixed"  # Safe default that works on most modern GPUs
+    
+    # For script environments, safe to get device details
+    try:
+        device_name = torch.cuda.get_device_name()
+        
+        # RTX 50/40 series and H100 can handle bf16 very well
+        if any(gpu in device_name for gpu in ['RTX 50', 'RTX 40', 'H100', 'H200']):
+            # Check if bfloat16 is supported
+            if torch.cuda.is_bf16_supported():
+                return "bf16-mixed"  # Best for newest GPUs
+            else:
+                return "16-mixed"
+        
+        # For other modern GPUs with Tensor Cores, use 16-mixed
+        tensor_core_gpus = ['RTX 30', 'RTX 20', 'A100', 'A40', 'A30', 'A10', 'V100', 'T4']
+        if any(gpu in device_name for gpu in tensor_core_gpus):
             return "16-mixed"
-    
-    # For other modern GPUs with Tensor Cores, use 16-mixed
-    tensor_core_gpus = ['RTX 30', 'RTX 20', 'A100', 'A40', 'A30', 'A10', 'V100', 'T4']
-    if any(gpu in device_name for gpu in tensor_core_gpus):
+        
+        # For older GPUs without Tensor Cores
+        return "32-true"
+        
+    except RuntimeError:
+        # If we can't get device name, use safe default
         return "16-mixed"
-    
-    # For older GPUs without Tensor Cores
-    return "32-true"
 
 def is_interactive_environment():
     """Detect if running in interactive environment (Jupyter/Colab/Kaggle)"""
@@ -189,45 +229,83 @@ def is_interactive_environment():
     return False
 
 def get_optimal_trainer_settings():
-    """Get optimal trainer settings based on available hardware"""
+    """Get optimal trainer settings based on available hardware with minimal CUDA initialization"""
     settings = {
         'gradient_clip_val': 1.0,
         'accumulate_grad_batches': 1,
         'enable_checkpointing': True
     }
     
-    if torch.cuda.is_available():
+    # Check CUDA availability without initializing context
+    cuda_available = torch.cuda.is_available()
+    
+    if cuda_available:
         is_interactive = is_interactive_environment()
         
-        # For interactive environments, we need to be careful about CUDA initialization
+        # For interactive environments, avoid early CUDA calls that initialize context
         if is_interactive:
-            # Use environment variables or lazy detection to avoid CUDA context issues
-            device_count = torch.cuda.device_count()  # This is safe in most cases
+            # Use environment variables or safer methods to get device count
+            try:
+                # Try to get device count from environment variable first
+                device_count = int(os.environ.get('CUDA_VISIBLE_DEVICES', '0').count(',') + 1)
+                if os.environ.get('CUDA_VISIBLE_DEVICES') == '':
+                    device_count = 0
+            except:
+                # Fallback: Use torch but be very careful
+                try:
+                    device_count = torch.cuda.device_count()
+                except RuntimeError:
+                    # CUDA context might be corrupted, assume single GPU
+                    device_count = 1
             
             console.print(f"[blue]📓 Interactive environment detected[/blue]")
-            console.print(f"[blue]🖥️  Available GPUs: {device_count}[/blue]")
+            console.print(f"[blue]🖥️  Estimated GPUs: {device_count}[/blue]")
             
             if device_count > 1:
                 # For multi-GPU in interactive environments, use ddp_notebook strategy
-                # PyTorch Lightning requires this for notebook compatibility
-                console.print("[yellow]📔 Using ddp_notebook strategy for interactive multi-GPU[/yellow]")
-                settings['strategy'] = 'ddp_notebook'  # Required for notebook environments
-                settings['devices'] = device_count
+                # But check if CUDA context is already initialized
+                try:
+                    # Test if CUDA context is clean
+                    if torch.cuda.is_initialized():
+                        console.print("[red]⚠️  CUDA context already initialized! Falling back to single GPU[/red]")
+                        console.print("[blue]💡 This prevents multiprocessing conflicts in notebooks[/blue]")
+                        device_count = 1
+                        settings['devices'] = 1
+                        settings['strategy'] = 'auto'
+                    else:
+                        # Safe to use multi-GPU
+                        console.print("[yellow]📔 Using ddp_notebook strategy for interactive multi-GPU[/yellow]")
+                        settings['strategy'] = 'ddp_notebook'  # Required for notebook environments
+                        settings['devices'] = device_count
+                except RuntimeError:
+                    # If we can't check CUDA status, be conservative
+                    console.print("[yellow]⚠️  Cannot check CUDA status. Using single GPU for safety[/yellow]")
+                    device_count = 1
+                    settings['devices'] = 1
+                    settings['strategy'] = 'auto'
                 
-                console.print(f"[green]🚀 Multi-GPU training enabled with {device_count} GPUs using DDP Notebook[/green]")
-                console.print("[blue]💡 DDP Notebook is the only supported multi-GPU strategy in notebooks[/blue]")
-                
-                # Adjust batch size for multi-GPU
-                console.print(f"[yellow]💡 Remember to scale your batch size for {device_count} GPUs[/yellow]")
-                console.print(f"[yellow]   Effective batch size = batch_size × {device_count}[/yellow]")
+                if device_count > 1:
+                    console.print(f"[green]🚀 Multi-GPU training enabled with {device_count} GPUs using DDP Notebook[/green]")
+                    console.print("[blue]💡 DDP Notebook is the only supported multi-GPU strategy in notebooks[/blue]")
+                    
+                    # Adjust batch size for multi-GPU
+                    console.print(f"[yellow]💡 Remember to scale your batch size for {device_count} GPUs[/yellow]")
+                    console.print(f"[yellow]   Effective batch size = batch_size × {device_count}[/yellow]")
+                else:
+                    console.print(f"[blue]⚙️  Single GPU training (fallback for notebook safety)[/blue]")
             else:
                 settings['devices'] = 1
                 console.print(f"[blue]⚙️  Single GPU training in interactive environment[/blue]")
                 
         else:
-            # Script environment - safe to get detailed GPU info
-            device_count = torch.cuda.device_count()
-            device_name = torch.cuda.get_device_name() if device_count > 0 else "Unknown"
+            # Script environment - can safely get detailed GPU info
+            try:
+                device_count = torch.cuda.device_count()
+                device_name = torch.cuda.get_device_name() if device_count > 0 else "Unknown"
+            except RuntimeError:
+                # If CUDA context is corrupted, fallback to safe defaults
+                device_count = 1
+                device_name = "Unknown (CUDA context issue)"
             
             console.print(f"[blue]🖥️  Available GPUs: {device_count}[/blue]")
             if device_count > 0:
@@ -289,12 +367,34 @@ def calculate_optimal_batch_size(base_batch_size: int, device_count: int = None)
     return per_gpu_batch_size
 
 def get_multi_gpu_config():
-    """Get multi-GPU configuration info"""
-    if not torch.cuda.is_available():
+    """Get multi-GPU configuration info with minimal CUDA initialization"""
+    cuda_available = torch.cuda.is_available()
+    
+    if not cuda_available:
         return {'devices': 1, 'strategy': 'auto', 'num_gpus': 0}
     
-    device_count = torch.cuda.device_count()
     is_interactive = is_interactive_environment()
+    
+    # Get device count safely without initializing CUDA context
+    try:
+        # First try environment variable method
+        if 'CUDA_VISIBLE_DEVICES' in os.environ:
+            visible_devices = os.environ['CUDA_VISIBLE_DEVICES']
+            if visible_devices == '':
+                device_count = 0
+            else:
+                device_count = len(visible_devices.split(','))
+        else:
+            # Fallback to torch method, but be careful in interactive environments
+            if is_interactive:
+                # In interactive environments, defer this call
+                device_count = 1  # Conservative assumption
+                console.print("[yellow]⚠️  Using conservative GPU count in interactive environment[/yellow]")
+            else:
+                device_count = torch.cuda.device_count()
+    except RuntimeError as e:
+        console.print(f"[yellow]⚠️  CUDA error when getting device count: {e}[/yellow]")
+        device_count = 1
     
     # Determine strategy based on environment
     if device_count > 1:
@@ -971,8 +1071,10 @@ class BaseTrainer:
         ]
         
         # Trainer
+        # Get precision and settings safely without early CUDA initialization
         precision = get_optimal_precision()
         trainer_settings = get_optimal_trainer_settings()
+        
         console.print(f"[blue]🎯 Using precision: {precision}[/blue]")
         console.print(f"[dim]📋 Trainer settings: {list(trainer_settings.keys())}[/dim]")
         
@@ -986,6 +1088,14 @@ class BaseTrainer:
         if len(filtered_settings) != len(trainer_settings):
             removed_args = set(trainer_settings.keys()) - set(filtered_settings.keys())
             console.print(f"[yellow]⚠️  Filtered out invalid Trainer args: {removed_args}[/yellow]")
+        
+        # Setup tensor cores AFTER creating trainer to avoid CUDA context issues
+        if is_interactive_environment():
+            console.print(f"[blue]⚡ Tensor Core setup deferred for notebook compatibility[/blue]")
+        else:
+            setup_tensor_cores()  # Safe to call in script environment
+        
+        console.print(f"[yellow]🔧 Creating PyTorch Lightning Trainer...[/yellow]")
         
         trainer = L.Trainer(
             max_epochs=max_epochs,

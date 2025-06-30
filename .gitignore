@@ -55,3 +55,4 @@ Thumbs.db
 CONFIG_IMPORT_FIX.md
 __pycache__/data_utils.cpython-311.pyc
 
+test_multi_gpu_fix.ipynb

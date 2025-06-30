@@ -208,14 +208,14 @@ def get_optimal_trainer_settings():
             console.print(f"[blue]🖥️  Available GPUs: {device_count}[/blue]")
             
             if device_count > 1:
-                # For multi-GPU in interactive environments, use ddp_spawn strategy
-                # This avoids the multiprocessing launcher issues
-                console.print("[yellow]� Using ddp_spawn strategy for interactive multi-GPU[/yellow]")
-                settings['strategy'] = 'ddp_spawn'  # Better for interactive environments
+                # For multi-GPU in interactive environments, use ddp_notebook strategy
+                # PyTorch Lightning requires this for notebook compatibility
+                console.print("[yellow]📔 Using ddp_notebook strategy for interactive multi-GPU[/yellow]")
+                settings['strategy'] = 'ddp_notebook'  # Required for notebook environments
                 settings['devices'] = device_count
                 
-                console.print(f"[green]🚀 Multi-GPU training enabled with {device_count} GPUs using DDP Spawn[/green]")
-                console.print("[blue]💡 DDP Spawn avoids CUDA context conflicts in notebooks[/blue]")
+                console.print(f"[green]🚀 Multi-GPU training enabled with {device_count} GPUs using DDP Notebook[/green]")
+                console.print("[blue]💡 DDP Notebook is the only supported multi-GPU strategy in notebooks[/blue]")
                 
                 # Adjust batch size for multi-GPU
                 console.print(f"[yellow]💡 Remember to scale your batch size for {device_count} GPUs[/yellow]")
@@ -299,8 +299,8 @@ def get_multi_gpu_config():
     # Determine strategy based on environment
     if device_count > 1:
         if is_interactive:
-            # Use ddp_spawn for interactive environments to avoid CUDA context issues
-            strategy = 'ddp_spawn'
+            # Use ddp_notebook for interactive environments - required by PyTorch Lightning
+            strategy = 'ddp_notebook'
         else:
             strategy = 'ddp'
     else:
@@ -317,7 +317,7 @@ def get_multi_gpu_config():
     
     if device_count > 1:
         env_type = "Interactive (Jupyter/Colab/Kaggle)" if is_interactive else "Script"
-        strategy_name = "DDP Spawn" if is_interactive else "DDP"
+        strategy_name = "DDP Notebook" if is_interactive else "DDP"
         
         console.print(f"[bold green]🚀 Multi-GPU Setup Detected![/bold green]")
         console.print(f"  Environment: {env_type}")
